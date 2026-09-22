@@ -1,0 +1,30 @@
+version: '3.8'
+
+services:
+  backend:
+    build:
+      context: .
+      dockerfile: backend.Dockerfile
+    container_name: jobfinder_backend
+    ports:
+      - "8000:8000"
+    volumes:
+      # Mount storage locally so data persists across restarts
+      - ./jobfinder.db:/app/jobfinder.db
+      - ./uploads:/app/uploads
+      - ./chroma_db:/app/chroma_db
+    env_file:
+      - .env  # Injects your AWS and JWT keys securely
+
+  frontend:
+    build:
+      context: .
+      dockerfile: frontend.Dockerfile
+    container_name: jobfinder_frontend
+    ports:
+      - "8501:8501"
+    depends_on:
+      - backend
+    environment:
+      # Tell Streamlit to talk to the backend container over the internal network
+      - BACKEND_URL=http://backend:8000
