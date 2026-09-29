@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 jobfinder.db
+data/
 uploads/
 vector_db/
 *.pdf

@@ -1,0 +1,10 @@
+.venv/
+.git/
+__pycache__/
+*.pyc
+vector_db/
+uploads/
+jobfinder.db
+*.pdf
+.env
+.gitignore

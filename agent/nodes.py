@@ -13,116 +13,154 @@ from langchain_core.output_parsers import StrOutputParser
 llm = ChatGoogleGenerativeAI(model="gemini-3.1-flash-lite", temperature=0.2)
 llm_with_tools = llm.bind_tools(ALL_TOOLS)
 
+import json
+
+def extract_text_from_response(content):
+    if isinstance(content, list):
+        if len(content) > 0 and isinstance(content[0], dict) and "text" in content[0]:
+            return content[0]["text"]
+    elif isinstance(content, str):
+        return content
+    return str(content)
 
 def job_search_agent(state: State):
   """Stage 1: Job Discovery Agent (Dynamic Vector-Driven Search)."""
   user_id = state.get("user_id", "anonymous")
+  structured_profile = state.get('structured_profile', {})
   
-  # 1. Get the user's intent from the frontend (e.g., location or preference)
   user_intent = state["messages"][0].content if state["messages"] else "Find jobs"
   
-  # 2. Fetch the candidate's core skills and titles from ChromaDB
   profile_query = "core skills job titles industries current role"
   query_vector = vector_store.embeddings.embed_query(profile_query)
   
   vector_results = vector_store.collection.query(
       query_embeddings=[query_vector],
-      n_results=2, # Just need a quick summary of who they are
+      n_results=2,
       where={"user_id": user_id}
   )
   
   retrieved_chunks = vector_results.get("documents", [[]])[0]
-  actual_user_profile = (
-      "\n".join(retrieved_chunks)
-      if retrieved_chunks
-      else "No resume uploaded."
-  )
+  actual_user_profile = "\n".join(retrieved_chunks) if retrieved_chunks else "No resume uploaded."
 
-  # 3. Ask the LLM to write a targeted Google/Serper search query
-  query_prompt = f"""
-    You are an expert technical recruiter sourcing roles.
+  preferred_titles = structured_profile.get('preferred_job_titles') or "Data Analyst"
+  preferred_locations = structured_profile.get('preferred_locations') or "Thailand"
+
+  # 1. Ask LLM to determine the best search keyword based on the profile
+  keyword_prompt = f"""
+    User intent: "{user_intent}"
+    Preferred Titles: "{preferred_titles}"
     
-    User's Request/Preferences: "{user_intent}"
-    Candidate's Actual CV Highlights: {actual_user_profile}
+    Output exactly ONE short job title to use as a search query on LinkedIn (e.g., Data Scientist). Do not add any quotes or extra text.
+  """
+  keyword_res = llm.invoke([HumanMessage(content=keyword_prompt)])
+  search_keyword = extract_text_from_response(keyword_res.content).strip()
+
+  # 2. Call the tool to fetch real LinkedIn jobs
+  from tools.job_tools import search_linkedin_jobs
+  tool_results = search_linkedin_jobs.invoke({"keyword": search_keyword, "location": preferred_locations})
+  print(f"Serper API results for {search_keyword}:", tool_results)
+
+  # 3. Ask LLM to parse the real results into a JSON array
+  parse_prompt = f"""
+    You are extracting real job postings into JSON.
+    
+    Here are the actual LinkedIn search results:
+    {tool_results}
     
     Task:
-    Generate a highly targeted Google Search query to find live job postings on LinkedIn that match this exact candidate.
-    Use boolean operators to maximize relevance based on their actual background.
-    Example format: site:linkedin.com/jobs "Job Title" ("Skill 1" OR "Skill 2") "Location"
+    Extract up to 3 jobs from these results. If the results show an API error or no results, fallback to generating 1-2 realistic mock jobs based on: {search_keyword}.
     
-    ONLY output the search string. Do not include quotes around the entire string, and do not provide any other text.
+    You MUST respond with a JSON array of objects. Each object must have exactly these keys:
+    - "title": The job title (from the results).
+    - "company": The company name (extract it from the title or snippet, e.g. if title says "at Google", company is Google. If unknown, use "Unknown Company").
+    - "snippet": A 2-3 sentence description from the snippet.
+    - "link": The actual URL link provided in the results (or '#' if mock).
+    
+    DO NOT output anything other than the JSON array. Do not include markdown codeblocks, just the JSON.
     """
     
-  chain = llm | StrOutputParser()
-  refined_search_query = chain.invoke([HumanMessage(content=query_prompt)]).strip()
+  response = llm.invoke([HumanMessage(content=parse_prompt)])
+  content_text = extract_text_from_response(response.content)
   
-  print(f"🔍 Optimized Search Query for {user_id}: {refined_search_query}")
+  try:
+      if content_text.startswith("```json"):
+          content_text = content_text[7:-3]
+      elif content_text.startswith("```"):
+          content_text = content_text[3:-3]
+      raw_jobs = json.loads(content_text.strip())
+  except Exception as e:
+      raw_jobs = [
+          {"title": f"{search_keyword} Role", "company": "Unknown", "snippet": str(content_text), "link": "#"}
+      ]
 
-  # 4. Execute your actual search tool (Serper API) using the optimized query
-  # raw_jobs = your_search_tool_function(refined_search_query)
-  
-  # Mocking the job response for demonstration
-  dummy_jobs = [
-      {"title": "Role based on dynamic search", "snippet": "...", "link": "#"}
-  ]
-
-  # We append an AI message so the next nodes know what search was executed
   return {
-      "messages": [HumanMessage(content=f"Executed search using: {refined_search_query}")],
-      "raw_jobs": dummy_jobs,
+      "messages": [HumanMessage(content=f"Found {len(raw_jobs)} matching roles for {search_keyword}.")],
+      "raw_jobs": raw_jobs,
   }
-
 
 def matching_screening_agent(state: State):
   """Stage 2: Matching & Screening Agent (Dynamic Multi-User)."""
   user_id = state.get("user_id", "anonymous")
+  structured_profile = state.get('structured_profile', {})
+  raw_jobs = state.get('raw_jobs', [])
   
-  # Extract raw jobs from message history or state
-  last_message = state["messages"][-1]
-  content_text = last_message.content if hasattr(last_message, "content") else str(last_message)
-  dummy_jobs = [{"title": "Target Role", "snippet": content_text, "link": "#"}]
-  
-  # 1. Fetch the user's ACTUAL background from the Vector DB
-  # We use a broad query to capture their general skills and education
   profile_query = "education background skills work experience projects"
   query_vector = vector_store.embeddings.embed_query(profile_query)
   
   vector_results = vector_store.collection.query(
       query_embeddings=[query_vector],
       n_results=4,
-      where={"user_id": user_id}  # Ensure we only pull THIS user's CV
+      where={"user_id": user_id}
   )
   
   retrieved_chunks = vector_results.get("documents", [[]])[0]
-  actual_user_profile = (
-      "\n".join(retrieved_chunks)
-      if retrieved_chunks
-      else f"No resume documents uploaded yet for user {user_id}."
-  )
+  actual_user_profile = "\n".join(retrieved_chunks) if retrieved_chunks else f"No resume documents uploaded yet for user {user_id}."
 
-  # 2. Evaluate the jobs against the dynamic profile
+  university = structured_profile.get('university') or "Not specified"
+  degree = structured_profile.get('degree') or "Not specified"
+  gpa = structured_profile.get('gpa') or "Not specified"
+  skills = structured_profile.get('skills') or "Not specified"
+
   prompt = f"""
     You are an expert Technical Recruiter and Matching Agent.
     
-    Here is the Candidate's Actual Profile (Extracted from their uploaded CV):
+    Candidate Profile (Extracted from CV):
     {actual_user_profile}
+
+    Structured Profile:
+    University: {university} | Degree: {degree} | GPA: {gpa} | Skills: {skills}
     
-    Here are the target jobs to evaluate:
-    {dummy_jobs}
+    Target Jobs:
+    {json.dumps(raw_jobs, indent=2, ensure_ascii=False)}
     
     Task:
-    1. Analyze these jobs against the candidate's actual skills and experience.
-    2. Assign a match percentage score (0-100%).
-    3. Provide a brief breakdown of matching strengths and missing skills.
+    Analyze how well the candidate fits EACH of the Target Jobs.
     
-    Format your response cleanly in markdown.
+    You MUST respond with a JSON array of objects, one for each job. Each object must have exactly these keys:
+    - "title": The job title (from Target Jobs).
+    - "company": The company name (from Target Jobs).
+    - "match_score": A percentage score of how well they match (e.g., "92").
+    - "details": Explain WHY they match, referencing specific skills from their CV versus the job snippet.
+    - "link": The exact link URL provided in Target Jobs.
+    
+    DO NOT output anything other than the JSON array. Do not include markdown codeblocks, just the JSON.
     """
 
   response = llm.invoke([HumanMessage(content=prompt)])
+  content_text = extract_text_from_response(response.content)
+
+  try:
+      if content_text.startswith("```json"):
+          content_text = content_text[7:-3]
+      elif content_text.startswith("```"):
+          content_text = content_text[3:-3]
+      scored_jobs = json.loads(content_text.strip())
+  except Exception as e:
+      scored_jobs = [{"title": "Parse Error", "company": "Unknown", "match_score": "0", "details": str(content_text)}]
 
   return {
       "messages": [response],
-      "scored_jobs": [{"evaluation": response.content}],
+      "scored_jobs": scored_jobs,
   }
 
 def asset_tailoring_agent(state: State):
@@ -130,10 +168,13 @@ def asset_tailoring_agent(state: State):
   
   # 1. Safely extract user_id from the state
   user_id = state.get("user_id", "anonymous")
+  structured_profile = state.get('structured_profile', {})
   
   scored_jobs = state.get("scored_jobs", [])
+  
+  import json
   evaluation_text = (
-      scored_jobs[-1]["evaluation"]
+      json.dumps(scored_jobs, indent=2, ensure_ascii=False)
       if scored_jobs
       else "No specific job evaluation found."
   )
@@ -156,11 +197,17 @@ def asset_tailoring_agent(state: State):
       else f"No resume documents uploaded yet for user {user_id}."
   )
 
+  full_name = structured_profile.get('full_name') or "Applicant"
+  university = structured_profile.get('university') or "Not specified"
+
   prompt = f"""
     You are an expert Career Coach and Professional Resume Writer.
     
     Here is the Candidate's Real Profile (Retrieved via Vector DB):
     {user_background_context}
+
+    Candidate Name: {full_name}
+    University: {university}
     
     Here is the recent job evaluation:
     {evaluation_text}

@@ -6,6 +6,7 @@ class State(TypedDict):
   user_id: str
   messages: Annotated[list, add_messages]
   user_profile: Dict[str, Any]
+  structured_profile: Dict[str, Any]
   raw_jobs: List[Dict[str, Any]]
   scored_jobs: List[Dict[str, Any]]
   tailored_assets: Dict[

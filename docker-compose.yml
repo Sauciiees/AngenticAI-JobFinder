@@ -4,22 +4,21 @@ services:
   backend:
     build:
       context: .
-      dockerfile: backend.Dockerfile
+      dockerfile: backend.dockerfile
     container_name: jobfinder_backend
     ports:
       - "8000:8000"
     volumes:
-      # Mount storage locally so data persists across restarts
-      - ./jobfinder.db:/app/jobfinder.db
+      - ./data:/app/data
       - ./uploads:/app/uploads
-      - ./chroma_db:/app/chroma_db
+      - ./vector_db:/app/vector_db
     env_file:
-      - .env  # Injects your AWS and JWT keys securely
+      - .env
 
   frontend:
     build:
       context: .
-      dockerfile: frontend.Dockerfile
+      dockerfile: frontend.dockerfile
     container_name: jobfinder_frontend
     ports:
       - "8501:8501"

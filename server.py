@@ -1,6 +1,6 @@
 import os
 import traceback
-from typing import Dict, Any
+from typing import Dict, Any, Optional
 from fastapi import FastAPI, UploadFile, File, HTTPException, Form
 from pydantic import BaseModel
 from dotenv import load_dotenv
@@ -25,6 +25,7 @@ models.Base.metadata.create_all(bind=engine)
 
 from agent.graph import app as langgraph_app
 from agent.parser import parse_and_store_document
+from agent.vector_store import vector_store
 
 app = FastAPI(title="Agentic AI Job Finder API", version="1.0")
 
@@ -48,6 +49,26 @@ class SearchRequest(BaseModel):
 class ResumeSessionRequest(BaseModel):
     session_id: str
     feedback: str = "approve"
+    job_title: Optional[str] = None
+    company: Optional[str] = None
+
+class StatusUpdateRequest(BaseModel):
+    status: str
+
+class ProfileUpdateRequest(BaseModel):
+    full_name: Optional[str] = None
+    email: Optional[str] = None
+    phone: Optional[str] = None
+    university: Optional[str] = None
+    degree: Optional[str] = None
+    gpa: Optional[float] = None
+    graduation_year: Optional[int] = None
+    skills: Optional[str] = None
+    work_experience: Optional[str] = None
+    linkedin_url: Optional[str] = None
+    github_url: Optional[str] = None
+    preferred_job_titles: Optional[str] = None
+    preferred_locations: Optional[str] = None
 
 
 # 1. Update upload route to accept user_id and pass it to the parser
@@ -102,10 +123,24 @@ async def start_job_search(
         # Securely inject the verified user ID into the LangGraph state
         user_id_str = f"user_{current_user.id}"
         
+        structured_profile = {
+            "full_name": current_user.full_name,
+            "email": current_user.email,
+            "university": current_user.university,
+            "degree": current_user.degree,
+            "gpa": current_user.gpa,
+            "graduation_year": current_user.graduation_year,
+            "skills": current_user.skills,
+            "work_experience": current_user.work_experience,
+            "preferred_job_titles": current_user.preferred_job_titles,
+            "preferred_locations": current_user.preferred_locations
+        }
+
         initial_state = {
             "user_id": user_id_str,  
             "messages": [("user", req.query)],
             "user_profile": {},  # Leave empty! Matching Agent uses Vector DB dynamically
+            "structured_profile": structured_profile,
             "raw_jobs": [],
             "scored_jobs": [],
             "tailored_assets": {},
@@ -120,12 +155,26 @@ async def start_job_search(
         
         if state_snapshot.next:
             values = state_snapshot.values
-            assets = values.get("tailored_assets", {}).get("top_job_assets", "No assets generated.")
+            raw_assets = values.get("tailored_assets", {}).get("top_job_assets", "No assets generated.")
+            
+            # Handle raw assets format (list of dicts with 'type'/'text' keys)
+            if isinstance(raw_assets, list):
+                if len(raw_assets) > 0 and isinstance(raw_assets[0], dict) and "text" in raw_assets[0]:
+                    assets = raw_assets[0]["text"]
+                else:
+                    assets = json.dumps(raw_assets)
+            elif isinstance(raw_assets, dict):
+                assets = raw_assets.get("text", json.dumps(raw_assets))
+            else:
+                assets = str(raw_assets)
+            
+            scored_jobs = values.get("scored_jobs", [])
             
             return {
                 "status": "paused_for_review",
                 "next_node": state_snapshot.next,
-                "tailored_assets": assets
+                "tailored_assets": assets,
+                "scored_jobs": scored_jobs
             }
         
         return {"status": "completed", "values": state_snapshot.values}
@@ -166,10 +215,11 @@ async def resume_job_search(
         else:
             assets_str = str(raw_assets)
         
-        # 3. Save the application to the database securely!
         new_app = models.Application(
             user_id=current_user.id,
-            status="Approved",
+            job_title=req.job_title,
+            company=req.company,
+            status="Applied",
             assets_preview=assets_str[:500] + "..." if len(assets_str) > 500 else assets_str
         )
         
@@ -238,7 +288,21 @@ async def login(user: UserAuthRequest, db: Session = Depends(get_db)):
         "token_type": "bearer",
         "user_id": db_user.id,
         "username": db_user.username,
-        "cv_filename": db_user.cv_filename  
+        "cv_filename": db_user.cv_filename,
+        "full_name": db_user.full_name,
+        "email": db_user.email,
+        "phone": db_user.phone,
+        "university": db_user.university,
+        "degree": db_user.degree,
+        "gpa": db_user.gpa,
+        "graduation_year": db_user.graduation_year,
+        "skills": db_user.skills,
+        "work_experience": db_user.work_experience,
+        "linkedin_url": db_user.linkedin_url,
+        "github_url": db_user.github_url,
+        "preferred_job_titles": db_user.preferred_job_titles,
+        "preferred_locations": db_user.preferred_locations,
+        "profile_completed": db_user.profile_completed
     }
 
 @app.get("/api/user/cv")
@@ -260,13 +324,16 @@ async def get_user_applications(
 ):
     """Fetch all logged job applications for the authenticated user."""
     try:
-        apps = db.query(models.Application).filter(models.Application.user_id == current_user.id).all()
+        apps = db.query(models.Application).filter(
+            models.Application.user_id == current_user.id
+        ).order_by(models.Application.timestamp.desc()).all()
         
-        # Serialize the database objects into a clean list of dictionaries
         results = []
         for app in apps:
             results.append({
                 "id": app.id,
+                "job_title": app.job_title or "Untitled Position",
+                "company": app.company or "Unknown Company",
                 "timestamp": app.timestamp.strftime("%Y-%m-%d %H:%M:%S") if app.timestamp else "",
                 "status": app.status,
                 "assets_preview": app.assets_preview
@@ -274,3 +341,92 @@ async def get_user_applications(
         return results
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
+
+@app.put("/api/applications/{app_id}/status")
+async def update_application_status(
+    app_id: int,
+    req: StatusUpdateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Update the status of an application."""
+    app = db.query(models.Application).filter(
+        models.Application.id == app_id,
+        models.Application.user_id == current_user.id
+    ).first()
+    
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+    
+    app.status = req.status
+    db.commit()
+    return {"status": "success", "message": f"Status updated to '{req.status}'"}
+
+@app.get("/api/profile")
+async def get_profile(current_user: models.User = Depends(get_current_user)):
+    return {
+        "full_name": current_user.full_name,
+        "email": current_user.email,
+        "phone": current_user.phone,
+        "university": current_user.university,
+        "degree": current_user.degree,
+        "gpa": current_user.gpa,
+        "graduation_year": current_user.graduation_year,
+        "skills": current_user.skills,
+        "work_experience": current_user.work_experience,
+        "linkedin_url": current_user.linkedin_url,
+        "github_url": current_user.github_url,
+        "preferred_job_titles": current_user.preferred_job_titles,
+        "preferred_locations": current_user.preferred_locations,
+        "profile_completed": current_user.profile_completed,
+        "cv_filename": current_user.cv_filename,
+    }
+
+@app.put("/api/profile")
+async def update_profile(
+    req: ProfileUpdateRequest,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    current_user.full_name = req.full_name
+    current_user.email = req.email
+    current_user.phone = req.phone
+    current_user.university = req.university
+    current_user.degree = req.degree
+    current_user.gpa = req.gpa
+    current_user.graduation_year = req.graduation_year
+    current_user.skills = req.skills
+    current_user.work_experience = req.work_experience
+    current_user.linkedin_url = req.linkedin_url
+    current_user.github_url = req.github_url
+    current_user.preferred_job_titles = req.preferred_job_titles
+    current_user.preferred_locations = req.preferred_locations
+    
+    has_full_name = bool(current_user.full_name)
+    has_other = bool(current_user.university or current_user.skills or current_user.cv_filename)
+    current_user.profile_completed = has_full_name and has_other
+    
+    db.commit()
+    return {"status": "success", "message": "Profile updated"}
+
+@app.delete("/api/profile/cv")
+async def delete_cv(
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    if current_user.cv_filepath and os.path.exists(current_user.cv_filepath):
+        try:
+            os.remove(current_user.cv_filepath)
+        except OSError:
+            pass
+    
+    current_user.cv_filename = None
+    current_user.cv_filepath = None
+    db.commit()
+
+    user_id_str = f"user_{current_user.id}"
+    results = vector_store.collection.get(where={"user_id": user_id_str})
+    if results and results.get('ids'):
+        vector_store.collection.delete(ids=results['ids'])
+
+    return {"status": "success", "message": "CV deleted"}

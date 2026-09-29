@@ -2,9 +2,11 @@ from sqlalchemy import create_engine
 from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
-# We use SQLite for local development. 
-# You can change this to a MySQL URL (e.g., mysql+pymysql://user:pass@localhost/dbname) later.
-SQLALCHEMY_DATABASE_URL = "sqlite:///./jobfinder.db"
+import os
+
+# Store SQLite database in a data/ directory for Docker volume compatibility
+os.makedirs("data", exist_ok=True)
+SQLALCHEMY_DATABASE_URL = "sqlite:///./data/jobfinder.db"
 
 # check_same_thread is needed only for SQLite
 engine = create_engine(
