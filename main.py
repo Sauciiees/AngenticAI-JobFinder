@@ -53,4 +53,4 @@ if __name__ == "__main__":
     for event in app.stream(Command(resume=feedback), config, stream_mode="values"):
       pass
 
-    print("\n✨ Pipeline execution completed successfully!")
+    print("\n Pipeline execution completed successfully!")

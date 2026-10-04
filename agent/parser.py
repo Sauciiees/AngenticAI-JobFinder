@@ -34,5 +34,5 @@ def parse_and_store_document(file_path: str, user_id: str, doc_type: str = "resu
 
   vector_store.add_documents(documents=chunks, metadatas=metadatas, ids=ids)
 
-  print(f"✅ Successfully parsed {len(chunks)} chunks for User: {user_id}!")
+  print(f"Successfully parsed {len(chunks)} chunks for User: {user_id}!")
   return chunks

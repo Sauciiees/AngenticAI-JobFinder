@@ -45,12 +45,18 @@ async def root():
 class SearchRequest(BaseModel):
     session_id: str
     query: str = "ช่วยหาตำแหน่ง Data Scientist หรือ AI Engineer ในไทยจาก LinkedIn ให้หน่อยครับ"
+    time_filter: str = "qdr:w"  # Default: past week. Options: qdr:d (24h), qdr:w (week), qdr:m (month)
+
+class JobSelectionRequest(BaseModel):
+    session_id: str
+    selected_indices: list  # List of integer indices the user selected
 
 class ResumeSessionRequest(BaseModel):
     session_id: str
     feedback: str = "approve"
     job_title: Optional[str] = None
     company: Optional[str] = None
+    jobs: Optional[list] = None
 
 class StatusUpdateRequest(BaseModel):
     status: str
@@ -69,6 +75,14 @@ class ProfileUpdateRequest(BaseModel):
     github_url: Optional[str] = None
     preferred_job_titles: Optional[str] = None
     preferred_locations: Optional[str] = None
+
+class ChatSessionResponse(BaseModel):
+    session_id: str
+    title: str
+    created_at: str
+
+class NewSessionRequest(BaseModel):
+    title: str = "New Chat"
 
 
 # 1. Update upload route to accept user_id and pass it to the parser
@@ -107,6 +121,7 @@ async def upload_resume(
         }
         
     except Exception as e:
+        traceback.print_exc()
         raise HTTPException(status_code=500, detail=str(e))
 
 
@@ -114,10 +129,28 @@ async def upload_resume(
 @app.post("/api/job-finder/start")
 async def start_job_search(
     req: SearchRequest,
-    current_user: models.User = Depends(get_current_user)
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
 ):
     """Protected: Only logged-in users can trigger the AI agents."""
     try:
+        # Auto-rename if this is a New Chat
+        session = db.query(models.ChatSession).filter(models.ChatSession.session_id == req.session_id).first()
+        if session and session.title == "New Chat":
+            from agent.nodes import llm
+            from langchain_core.messages import HumanMessage
+            try:
+                # Ask LLM for a very short title
+                prompt = f"Generate a short title (max 4 words) for this chat based on the user's first message. Message: '{req.query}'. Output ONLY the title, nothing else."
+                title_res = llm.invoke([HumanMessage(content=prompt)])
+                new_title = title_res.content.strip().replace('"', '')
+                session.title = new_title
+                db.commit()
+            except Exception as e:
+                # Fallback to truncating
+                session.title = req.query[:30] + ("..." if len(req.query) > 30 else "")
+                db.commit()
+
         config = {"configurable": {"thread_id": req.session_id}}
         
         # Securely inject the verified user ID into the LangGraph state
@@ -139,25 +172,43 @@ async def start_job_search(
         initial_state = {
             "user_id": user_id_str,  
             "messages": [("user", req.query)],
-            "user_profile": {},  # Leave empty! Matching Agent uses Vector DB dynamically
+            "user_profile": {},
             "structured_profile": structured_profile,
             "raw_jobs": [],
             "scored_jobs": [],
             "tailored_assets": {},
+            "route_intent": "",
+            "chat_response": "",
+            "time_filter": req.time_filter,
+            "selected_jobs": [],
         }
 
-        # Run until the first interrupt (Stage 4 HITL)
+        # Run until the first interrupt
         for event in langgraph_app.stream(initial_state, config, stream_mode="values"):
             pass
 
-        # Check graph state to see if it hit the interrupt
+        # Check graph state
         state_snapshot = langgraph_app.get_state(config)
+        values = state_snapshot.values
         
-        if state_snapshot.next:
-            values = state_snapshot.values
+        # If the router decided this was a chat, return the chat response
+        if values.get("route_intent") == "chat":
+            return {
+                "status": "chat_response",
+                "chat_response": values.get("chat_response", ""),
+            }
+
+        # If paused at job_selection_node — return all jobs for the card UI
+        if state_snapshot.next and "job_selection_node" in state_snapshot.next:
+            return {
+                "status": "paused_for_selection",
+                "raw_jobs": values.get("raw_jobs", []),
+            }
+        
+        # If paused at human_approval_node — return assets for review
+        if state_snapshot.next and "human_approval_node" in state_snapshot.next:
             raw_assets = values.get("tailored_assets", {}).get("top_job_assets", "No assets generated.")
             
-            # Handle raw assets format (list of dicts with 'type'/'text' keys)
             if isinstance(raw_assets, list):
                 if len(raw_assets) > 0 and isinstance(raw_assets[0], dict) and "text" in raw_assets[0]:
                     assets = raw_assets[0]["text"]
@@ -183,6 +234,55 @@ async def start_job_search(
         import traceback
         error_detail = traceback.format_exc()
         print("SERVER ERROR:\n", error_detail)
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.post("/api/job-finder/select-jobs")
+async def select_jobs(
+    req: JobSelectionRequest,
+    current_user: models.User = Depends(get_current_user)
+):
+    """Resumes the pipeline after user selects jobs from the card UI."""
+    try:
+        config = {"configurable": {"thread_id": req.session_id}}
+        
+        # Resume with the selected job indices
+        for event in langgraph_app.stream(
+            Command(resume=req.selected_indices), config, stream_mode="values"
+        ):
+            pass
+
+        # Check if we hit the next interrupt (human_approval_node)
+        state_snapshot = langgraph_app.get_state(config)
+        values = state_snapshot.values
+        
+        if state_snapshot.next and "human_approval_node" in state_snapshot.next:
+            raw_assets = values.get("tailored_assets", {}).get("top_job_assets", "No assets generated.")
+            
+            if isinstance(raw_assets, list):
+                if len(raw_assets) > 0 and isinstance(raw_assets[0], dict) and "text" in raw_assets[0]:
+                    assets = raw_assets[0]["text"]
+                else:
+                    assets = json.dumps(raw_assets)
+            elif isinstance(raw_assets, dict):
+                assets = raw_assets.get("text", json.dumps(raw_assets))
+            else:
+                assets = str(raw_assets)
+            
+            scored_jobs = values.get("scored_jobs", [])
+            
+            return {
+                "status": "paused_for_review",
+                "next_node": state_snapshot.next,
+                "tailored_assets": assets,
+                "scored_jobs": scored_jobs
+            }
+        
+        return {"status": "completed", "values": state_snapshot.values}
+
+    except Exception as e:
+        import traceback
+        error_detail = traceback.format_exc().encode('ascii', 'ignore').decode('ascii')
+        print("SELECT-JOBS ERROR:\n", error_detail)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/api/job-finder/resume")
@@ -214,24 +314,40 @@ async def resume_job_search(
             assets_str = json.dumps(raw_assets)
         else:
             assets_str = str(raw_assets)
+            
+        assets_preview = assets_str[:500] + "..." if len(assets_str) > 500 else assets_str
         
-        new_app = models.Application(
-            user_id=current_user.id,
-            job_title=req.job_title,
-            company=req.company,
-            status="Applied",
-            assets_preview=assets_str[:500] + "..." if len(assets_str) > 500 else assets_str
-        )
-        
-        db.add(new_app)
+        if req.jobs:
+            for j in req.jobs:
+                new_app = models.Application(
+                    user_id=current_user.id,
+                    job_title=j.get("title", "Unknown"),
+                    company=j.get("company", "Unknown"),
+                    logo_url=j.get("logo_url", ""),
+                    status="Applied",
+                    assets_preview=assets_preview
+                )
+                db.add(new_app)
+        else:
+            new_app = models.Application(
+                user_id=current_user.id,
+                job_title=req.job_title,
+                company=req.company,
+                logo_url="",
+                status="Applied",
+                assets_preview=assets_preview
+            )
+            db.add(new_app)
+            
         db.commit()
         
-        return {"status": "completed", "message": "Application logged successfully!"}
+        return {"status": "completed", "message": "Applications logged successfully!"}
 
     except Exception as e:
-        db.rollback()  # Protect the database if something crashes
+        db.rollback()
         import traceback
-        print("RESUME ERROR:\n", traceback.format_exc())
+        err_msg = traceback.format_exc().encode('ascii', 'ignore').decode('ascii')
+        print("RESUME ERROR:\n", err_msg)
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.get("/api/applications/{user_id}")
@@ -317,6 +433,25 @@ async def get_user_cv(current_user: models.User = Depends(get_current_user)):
         media_type="application/pdf"
     )
 
+@app.delete("/api/applications/{app_id}")
+async def delete_application(
+    app_id: int,
+    current_user: models.User = Depends(get_current_user),
+    db: Session = Depends(get_db)
+):
+    """Delete a logged job application."""
+    app = db.query(models.Application).filter(
+        models.Application.id == app_id,
+        models.Application.user_id == current_user.id
+    ).first()
+    
+    if not app:
+        raise HTTPException(status_code=404, detail="Application not found")
+        
+    db.delete(app)
+    db.commit()
+    return {"message": "Application deleted successfully"}
+
 @app.get("/api/applications")
 async def get_user_applications(
     current_user: models.User = Depends(get_current_user),
@@ -334,6 +469,7 @@ async def get_user_applications(
                 "id": app.id,
                 "job_title": app.job_title or "Untitled Position",
                 "company": app.company or "Unknown Company",
+                "logo_url": getattr(app, "logo_url", ""),
                 "timestamp": app.timestamp.strftime("%Y-%m-%d %H:%M:%S") if app.timestamp else "",
                 "status": app.status,
                 "assets_preview": app.assets_preview
@@ -430,3 +566,103 @@ async def delete_cv(
         vector_store.collection.delete(ids=results['ids'])
 
     return {"status": "success", "message": "CV deleted"}
+
+import uuid
+
+@app.get("/api/chat-sessions", response_model=list[ChatSessionResponse])
+def get_sessions(current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    sessions = db.query(models.ChatSession).filter(models.ChatSession.user_id == current_user.id).order_by(models.ChatSession.created_at.desc()).all()
+    return [{"session_id": s.session_id, "title": s.title, "created_at": str(s.created_at)} for s in sessions]
+
+@app.post("/api/chat-sessions")
+def create_session(req: NewSessionRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session_id = str(uuid.uuid4())
+    new_session = models.ChatSession(user_id=current_user.id, session_id=session_id, title=req.title)
+    db.add(new_session)
+    db.commit()
+    return {"session_id": session_id, "title": req.title}
+
+@app.put("/api/chat-sessions/{session_id}")
+def rename_session(session_id: str, req: NewSessionRequest, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session = db.query(models.ChatSession).filter(models.ChatSession.session_id == session_id, models.ChatSession.user_id == current_user.id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    session.title = req.title
+    db.commit()
+    return {"status": "success"}
+
+@app.delete("/api/chat-sessions/{session_id}")
+def delete_session(session_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    session = db.query(models.ChatSession).filter(models.ChatSession.session_id == session_id, models.ChatSession.user_id == current_user.id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+    db.delete(session)
+    db.commit()
+    return {"status": "success"}
+
+@app.get("/api/chat-sessions/{session_id}/history")
+def get_session_history(session_id: str, current_user: models.User = Depends(get_current_user), db: Session = Depends(get_db)):
+    # verify ownership
+    session = db.query(models.ChatSession).filter(models.ChatSession.session_id == session_id, models.ChatSession.user_id == current_user.id).first()
+    if not session:
+        raise HTTPException(status_code=404, detail="Session not found")
+        
+    config = {"configurable": {"thread_id": session_id}}
+    state_snapshot = langgraph_app.get_state(config)
+    values = state_snapshot.values if state_snapshot else {}
+    messages = values.get("messages", [])
+    
+    # Format messages for frontend
+    history = []
+    for msg in messages:
+        # Check type
+        msg_type = getattr(msg, "type", "")
+        if msg_type in ["human", "ai"]:
+            # If there are tool calls in AIMessage, skip returning tool_calls in content? 
+            # We just return the text content.
+            if msg.content:
+                text_content = ""
+                if isinstance(msg.content, list):
+                    for item in msg.content:
+                        if isinstance(item, dict) and "text" in item:
+                            text_content += item["text"] + "\n"
+                        elif isinstance(item, str):
+                            text_content += item + "\n"
+                else:
+                    text_content = str(msg.content)
+                if text_content.strip():
+                    history.append({"role": "user" if msg_type == "human" else "assistant", "content": text_content.strip()})
+        elif isinstance(msg, tuple):
+             if len(msg) >= 2 and msg[0] in ["human", "ai", "user", "assistant"]:
+                 # Map user->human, assistant->ai if needed
+                 role = "user" if msg[0] in ["human", "user"] else "assistant"
+                 if msg[1]:
+                     history.append({"role": role, "content": str(msg[1])})
+             
+    # Return current pipeline status if paused
+    status = "idle"
+    if state_snapshot and state_snapshot.next:
+        if "job_selection_node" in state_snapshot.next:
+            status = "paused_for_selection"
+        elif "human_approval_node" in state_snapshot.next:
+            status = "paused_for_review"
+            
+    # Format raw assets
+    raw_assets = values.get("tailored_assets", {}).get("top_job_assets", "No assets generated.")
+    if isinstance(raw_assets, list):
+        if len(raw_assets) > 0 and isinstance(raw_assets[0], dict) and "text" in raw_assets[0]:
+            assets = raw_assets[0]["text"]
+        else:
+            assets = json.dumps(raw_assets)
+    elif isinstance(raw_assets, dict):
+        assets = raw_assets.get("text", json.dumps(raw_assets))
+    else:
+        assets = str(raw_assets)
+            
+    return {
+        "history": history,
+        "status": status,
+        "raw_jobs": values.get("raw_jobs", []),
+        "scored_jobs": values.get("scored_jobs", []),
+        "tailored_assets": assets
+    }

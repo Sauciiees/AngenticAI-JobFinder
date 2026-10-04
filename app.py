@@ -530,7 +530,11 @@ if not st.session_state["token"]:
                             if res.status_code == 200:
                                 st.success("Account created! Switch to Sign In tab to log in.")
                             else:
-                                st.error(res.json().get("detail", "Error creating account."))
+                                try:
+                                    detail = res.json().get("detail", "Error creating account.")
+                                except Exception:
+                                    detail = res.text or "Error creating account."
+                                st.error(detail)
                         except requests.exceptions.ConnectionError:
                             st.error("Cannot connect to server.")
 
@@ -554,12 +558,50 @@ with st.sidebar:
     """, unsafe_allow_html=True)
 
     st.markdown("---")
+    st.markdown("### Chat History")
+    
+    if st.button("➕ New Chat", use_container_width=True, type="primary"):
+        res = api_post("/api/chat-sessions", json={"title": "New Chat"})
+        if res and res.status_code == 200:
+            st.session_state["sidebar_session_id"] = res.json()["session_id"]
+            st.session_state["pipeline_status"] = "idle"
+            st.session_state["page"] = "finder"
+            st.rerun()
 
+    sessions_res = api_get("/api/chat-sessions")
+    if sessions_res and sessions_res.status_code == 200:
+        sessions = sessions_res.json()
+        for s in sessions:
+            is_active = st.session_state.get("sidebar_session_id") == s["session_id"]
+            
+            # Create a row for the session button and the settings popover
+            col1, col2 = st.columns([8, 2])
+            with col1:
+                if st.button(f"💬 {s['title'][:15]}", key=f"session_{s['session_id']}", use_container_width=True, type="primary" if is_active else "secondary"):
+                    st.session_state["sidebar_session_id"] = s["session_id"]
+                    st.session_state["pipeline_status"] = "idle"
+                    st.session_state["page"] = "finder"
+                    st.rerun()
+            with col2:
+                with st.popover("⚙️"):
+                    st.markdown("**Rename Chat**")
+                    new_title = st.text_input("Title", value=s["title"], key=f"rename_{s['session_id']}", label_visibility="collapsed")
+                    if st.button("Save", key=f"save_{s['session_id']}", use_container_width=True):
+                        res = api_put(f"/api/chat-sessions/{s['session_id']}", json={"title": new_title})
+                        if res and res.status_code == 200:
+                            st.rerun()
+                    
+                    st.markdown("---")
+                    if st.button("🗑️ Delete", key=f"del_{s['session_id']}", use_container_width=True, type="primary"):
+                        res = api_delete(f"/api/chat-sessions/{s['session_id']}")
+                        if res and res.status_code == 200:
+                            if st.session_state.get("sidebar_session_id") == s["session_id"]:
+                                st.session_state["sidebar_session_id"] = None
+                            st.rerun()
+
+    st.markdown("---")
+    st.markdown("### Account")
     # Navigation
-    if st.button("Job Finder", use_container_width=True, type="primary" if st.session_state["page"] == "finder" else "secondary"):
-        st.session_state["page"] = "finder"
-        st.rerun()
-
     if st.button("My Profile", use_container_width=True, type="primary" if st.session_state["page"] == "profile" else "secondary"):
         st.session_state["page"] = "profile"
         st.rerun()
@@ -568,27 +610,185 @@ with st.sidebar:
         st.session_state["page"] = "applications"
         st.rerun()
 
-    st.markdown("---")
-
-    # Session config (collapsible)
-    with st.expander("Advanced Settings"):
-        session_id = st.text_input("Thread ID", value="job_finder_session_1", key="sidebar_session_id")
-    
-    if "sidebar_session_id" not in st.session_state:
-        st.session_state["sidebar_session_id"] = "job_finder_session_1"
-
     # Spacer + Logout
     st.markdown("<br>" * 3, unsafe_allow_html=True)
     if st.button("Log Out", use_container_width=True):
         st.session_state.clear()
         st.rerun()
 
+# Get session_id from sidebar, or create one
+session_id = st.session_state.get("sidebar_session_id")
+if not session_id and st.session_state.get("page") == "finder":
+    res = api_post("/api/chat-sessions", json={"title": "New Chat"})
+    if res and res.status_code == 200:
+        session_id = res.json()["session_id"]
+        st.session_state["sidebar_session_id"] = session_id
 
-# Get session_id from sidebar
-session_id = st.session_state.get("sidebar_session_id", "job_finder_session_1")
 
+if st.session_state.get("page") == "finder":
+
+    
+    # Fetch chat history
+    history = []
+    if session_id:
+        res = api_get(f"/api/chat-sessions/{session_id}/history")
+        if res and res.status_code == 200:
+            data = res.json()
+            history = data.get("history", [])
+            # Only update status if it's currently idle or not set locally
+            if st.session_state.get("pipeline_status", "idle") in ["idle", "completed"]:
+                st.session_state["pipeline_status"] = data.get("status", "idle")
+                st.session_state["raw_jobs_for_selection"] = data.get("raw_jobs", [])
+                st.session_state["scored_jobs"] = data.get("scored_jobs", [])
+                st.session_state["tailored_assets"] = data.get("tailored_assets", {})
+
+    # Display chat history in continuous layout
+    for idx, msg in enumerate(history):
+        st.chat_message(msg["role"]).markdown(msg["content"])
+        
+    # Show pipeline UI at the bottom if paused
+    pipeline_status = st.session_state.get("pipeline_status")
+    
+    if pipeline_status == "paused_for_selection":
+        st.markdown("---")
+        st.markdown("### 📋 Select Jobs to Apply")
+        
+        raw_jobs = st.session_state.get("raw_jobs_for_selection", [])
+        if not raw_jobs:
+            st.warning("No jobs found. Try a different search query.")
+        else:
+            if "selected_job_indices" not in st.session_state:
+                st.session_state["selected_job_indices"] = []
+                
+            col_sel1, col_sel2, _ = st.columns([1, 1, 3])
+            with col_sel1:
+                if st.button("Select All"):
+                    st.session_state["selected_job_indices"] = list(range(len(raw_jobs)))
+                    st.rerun()
+            with col_sel2:
+                if st.button("Deselect All"):
+                    st.session_state["selected_job_indices"] = []
+                    st.rerun()
+                    
+            st.markdown("<br>", unsafe_allow_html=True)
+            for idx, job in enumerate(raw_jobs):
+                with st.container(border=True):
+                    col1, col2, col3 = st.columns([1, 8, 2])
+                    
+                    company_name = job.get('company', 'Unknown')
+                    
+                    # Use real logo from LinkedIn if available, fallback to ui-avatars
+                    logo = job.get('logo_url', '')
+                    if not logo or 'ghost' in logo or 'static.licdn' in logo:
+                        import urllib.parse
+                        safe_name = urllib.parse.quote(company_name or 'Job')
+                        logo = f"https://ui-avatars.com/api/?name={safe_name}&background=random&size=100"
+                        
+                    with col1:
+                        try:
+                            st.image(logo, width=50)
+                        except Exception:
+                            st.markdown("🏢")
+                        
+                    with col2:
+                        st.markdown(f"**{job.get('title', 'Unknown Title')}**")
+                        location_text = job.get('location', '')
+                        meta_parts = [f"🏢 **{company_name}**"]
+                        if location_text:
+                            meta_parts.append(f"📍 {location_text}")
+                        if job.get('date'):
+                            meta_parts.append(f"🕒 {job.get('date')}")
+                        st.markdown(" &nbsp;•&nbsp; ".join(meta_parts))
+                        if job.get('snippet') and job['snippet'] != '':
+                            st.caption(job['snippet'][:150] + "...")
+                        st.markdown(f"[View Job on {job.get('platform', 'Website')} ↗]({job.get('link', '#')})")
+                        
+                    with col3:
+                        is_selected = st.checkbox("Select", value=idx in st.session_state.get("selected_job_indices", []), key=f"job_{idx}")
+                        
+                current_selections = st.session_state.get("selected_job_indices", [])
+                if is_selected and idx not in current_selections:
+                    current_selections.append(idx)
+                elif not is_selected and idx in current_selections:
+                    current_selections.remove(idx)
+                st.session_state["selected_job_indices"] = current_selections
+                
+            if st.button(f"Continue with {len(st.session_state.get('selected_job_indices', []))} Jobs", type="primary"):
+                with st.spinner("AI agents are screening and tailoring..."):
+                    payload = {"session_id": session_id, "selected_indices": st.session_state["selected_job_indices"]}
+                    res = api_post("/api/job-finder/select-jobs", json=payload)
+                    if res and res.status_code == 200:
+                        data = res.json()
+                        st.session_state["pipeline_status"] = data["status"]
+                        st.session_state["tailored_assets"] = data.get("tailored_assets", "No assets found.")
+                        st.session_state["scored_jobs"] = data.get("scored_jobs", [])
+                        st.rerun()
+            if st.button("Cancel & Clear", type="secondary"):
+                st.session_state["pipeline_status"] = "idle"
+                st.rerun()
+
+    elif pipeline_status == "paused_for_review":
+        st.markdown("---")
+        st.markdown("### 📝 Review & Apply")
+        scored_jobs = st.session_state.get("scored_jobs", [])
+        if scored_jobs:
+            st.info(f"You have selected {len(scored_jobs)} job(s). Review the generated cover letters and resume bullets below.")
+            
+            with st.expander("View Generated Cover Letters / Resumes"):
+                st.markdown(str(st.session_state.get("tailored_assets", "")))
+                
+            col1, col2 = st.columns(2)
+            with col1:
+                if st.button("Approve & Apply to All", type="primary"):
+                    with st.spinner("Finalizing applications..."):
+                        payload = {
+                            "session_id": session_id,
+                            "feedback": "approve",
+                            "jobs": scored_jobs
+                        }
+                        res = api_post("/api/job-finder/resume", json=payload)
+                        if res and res.status_code == 200:
+                            st.success("Applications approved and logged!")
+                            st.session_state["pipeline_status"] = "completed"
+                            st.rerun()
+            with col2:
+                if st.button("Reject", type="secondary"):
+                    st.session_state["pipeline_status"] = "idle"
+                    st.rerun()
+
+    with st.container(border=False):
+        # We put the time filter right above the chat input
+        time_options = {
+            "Past 24 hours": "qdr:d",
+            "Past week": "qdr:w",
+            "Past month": "qdr:m",
+        }
+        selected_time_label = st.radio("Search timeframe:", options=list(time_options.keys()), index=1, horizontal=True)
+        st.session_state["time_filter"] = time_options[selected_time_label]
+        
+    # Chat Input (Sticky at Bottom)
+    prompt = st.chat_input("Ask a question or search for a job...")
+    if prompt:
+        st.chat_message("user").markdown(prompt)
+        time_filter = st.session_state.get("time_filter", "qdr:w")
+        
+        with st.spinner("AI is thinking..."):
+            payload = {"session_id": session_id, "query": prompt, "time_filter": time_filter}
+            res = api_post("/api/job-finder/start", json=payload)
+            if res and res.status_code == 200:
+                data = res.json()
+                st.session_state["pipeline_status"] = data["status"]
+                if data["status"] == "paused_for_selection":
+                    st.session_state["raw_jobs_for_selection"] = data.get("raw_jobs", [])
+                elif data["status"] == "paused_for_review":
+                    st.session_state["tailored_assets"] = data.get("tailored_assets", {})
+                    st.session_state["scored_jobs"] = data.get("scored_jobs", [])
+                st.rerun()
+            else:
+                st.error("Failed to connect.")
 
 # ============================================================
+# PAGE: MY PROFILE
 # PAGE: MY PROFILE
 # ============================================================
 if st.session_state["page"] == "profile":
@@ -750,127 +950,6 @@ if st.session_state["page"] == "profile":
 
 
 # ============================================================
-# PAGE: JOB FINDER
-# ============================================================
-elif st.session_state["page"] == "finder":
-    st.markdown('<div class="gradient-title">Job Finder</div>', unsafe_allow_html=True)
-    st.markdown('<p class="subtitle">Let AI agents search, match, and tailor applications for you</p>', unsafe_allow_html=True)
-
-    # Pipeline status display
-    if st.session_state.get("pipeline_status") == "paused_for_review":
-        # Human-in-the-Loop Review
-        st.markdown("""
-        <div class="review-card">
-            <h3 style="margin-top:0;">Review Required — Select a Job</h3>
-            <p style="color:var(--text-secondary);">The AI agents have identified matching jobs for you. Review and select which one to apply to.</p>
-        </div>
-        """, unsafe_allow_html=True)
-
-        scored_jobs = st.session_state.get("scored_jobs", [])
-        
-        if not scored_jobs:
-            st.warning("No scored jobs found in the pipeline state.")
-        else:
-            # Let user select a job to apply to
-            job_options = {f"{j.get('title', 'Target Role')} at {j.get('company', 'Company')}": j for j in scored_jobs}
-            selected_job_label = st.radio("Select a Job Match to Proceed", options=list(job_options.keys()))
-            selected_job = job_options[selected_job_label]
-
-            link = selected_job.get('link', '#')
-            link_html = f"<a href='{link}' target='_blank' style='color:var(--accent-blue);'>View on LinkedIn</a>" if link and link != '#' else ""
-
-            st.markdown(f"""
-            <div class="job-choice-card">
-                <h4>{selected_job.get('title', '')} @ {selected_job.get('company', '')}</h4>
-                <p><strong>Match Score:</strong> {selected_job.get('match_score', 'N/A')}%</p>
-                <p>{selected_job.get('details', '')}</p>
-                <p style="margin-top:8px;">{link_html}</p>
-            </div>
-            """, unsafe_allow_html=True)
-            
-            with st.expander("View Generated Cover Letter / Resume Updates"):
-                # Nicely format the raw text
-                formatted_assets = extract_text(st.session_state.get("tailored_assets", ""))
-                st.markdown(formatted_assets)
-
-            col1, col2, col3 = st.columns([1, 1, 2])
-            with col1:
-                if st.button("Approve & Apply", type="primary", use_container_width=True):
-                    with st.spinner("Finalizing application..."):
-                        payload = {
-                            "session_id": session_id,
-                            "feedback": "approve",
-                            "job_title": selected_job.get('title', 'Target Role'),
-                            "company": selected_job.get('company', 'Target Company')
-                        }
-                        res = api_post("/api/job-finder/resume", json=payload)
-                        if res and res.status_code == 200:
-                            st.success("Application approved and logged!")
-                            st.session_state["pipeline_status"] = "completed"
-                            st.rerun()
-                        else:
-                            st.error("Failed to resume pipeline.")
-            with col2:
-                if st.button("Reject All", type="secondary", use_container_width=True):
-                    st.session_state["pipeline_status"] = None
-                    st.warning("Rejected. You can start a new search.")
-                    st.rerun()
-
-    elif st.session_state.get("pipeline_status") == "completed":
-        st.success("Last pipeline completed successfully! Start a new search below.")
-        st.session_state["pipeline_status"] = None
-
-    # Search interface
-    st.markdown("---")
-    
-    st.markdown("""
-    <div class="gemini-card">
-        <h3>Start a Job Search</h3>
-        <p style="color:var(--text-secondary); margin-bottom:16px;">
-            Describe what kind of job you're looking for. The AI agents will search, evaluate matches, and generate tailored application materials.
-        </p>
-    </div>
-    """, unsafe_allow_html=True)
-
-    search_query = st.text_input(
-        "What role are you looking for?",
-        value="Find Data Scientist jobs in Thailand",
-        placeholder="e.g. Find ML Engineer roles in Bangkok with PyTorch experience",
-        label_visibility="collapsed",
-    )
-
-    if st.button("Start AI Agent Pipeline", type="primary", use_container_width=True):
-        with st.spinner("Agents are searching, screening, and tailoring..."):
-            payload = {"session_id": session_id, "query": search_query}
-            response = api_post("/api/job-finder/start", json=payload)
-
-            if response and response.status_code == 200:
-                data = response.json()
-                st.session_state["pipeline_status"] = data["status"]
-                st.session_state["tailored_assets"] = data.get("tailored_assets", "No assets found.")
-                st.session_state["scored_jobs"] = data.get("scored_jobs", [])
-                st.rerun()
-            elif response:
-                st.error(f"Error: {response.json().get('detail', response.text)}")
-            else:
-                st.error("Cannot connect to backend server.")
-
-    # Pipeline stages info
-    with st.expander("How the AI Agent Pipeline Works"):
-        st.markdown("""
-        The pipeline runs through **5 stages**:
-        
-        | Stage | Agent | Description |
-        |-------|-------|-------------|
-        | 1 | **Job Discovery** | Searches LinkedIn for relevant positions using your profile |
-        | 2 | **Matching & Screening** | Evaluates jobs against your skills and assigns match scores |
-        | 3 | **Asset Tailoring** | Generates a tailored cover letter and resume bullet points |
-        | 4 | **Human Review** | You review and approve/reject the generated materials |
-        | 5 | **Application Tracker** | Logs approved applications to your tracker |
-        """)
-
-
-# ============================================================
 # PAGE: APPLICATIONS
 # ============================================================
 elif st.session_state["page"] == "applications":
@@ -907,41 +986,52 @@ elif st.session_state["page"] == "applications":
                 timestamp = app.get("timestamp", "N/A")
                 job_title = app.get("job_title", "Untitled")
                 company = app.get("company", "Unknown")
+                logo_url = app.get("logo_url", "")
                 status = app.get("status", "Applied")
                 
                 if status not in status_options:
                     status_options.append(status)
 
-                # Ensure status is in options list
                 try:
                     default_index = status_options.index(status)
                 except ValueError:
                     default_index = 0
 
-                st.markdown(f"""
-                <div class="app-card">
-                    <div class="job-title">{job_title}</div>
-                    <div class="company">{company}</div>
-                    <div class="timestamp" style="margin-bottom:12px;">Added on {timestamp}</div>
-                </div>
-                """, unsafe_allow_html=True)
-                
-                col1, col2 = st.columns([1, 2])
-                with col1:
-                    select_key = f"status_{app_id}"
-                    st.selectbox(
-                        "Status", 
-                        options=status_options, 
-                        index=default_index, 
-                        key=select_key,
-                        on_change=update_status,
-                        args=(app_id, select_key),
-                        label_visibility="collapsed"
-                    )
-                with col2:
-                    with st.expander("View Application Assets"):
-                        formatted_preview = extract_text(app.get("assets_preview", ""))
-                        st.markdown(formatted_preview)
+                with st.container(border=True):
+                    col_logo, col_info, col_del = st.columns([1, 4, 1])
+                    with col_logo:
+                        if logo_url:
+                            st.image(logo_url, width=60)
+                        else:
+                            st.image(f"https://ui-avatars.com/api/?name={company}&background=random&color=fff", width=60)
+                            
+                    with col_info:
+                        st.markdown(f"**{job_title}**")
+                        st.markdown(f"{company}")
+                        st.caption(f"Added on {timestamp}")
+                        
+                    with col_del:
+                        if st.button("Delete", key=f"del_{app_id}"):
+                            res = api_delete(f"/api/applications/{app_id}")
+                            if res and res.status_code == 200:
+                                st.rerun()
+                                
+                    col_status, col_assets = st.columns([1, 2])
+                    with col_status:
+                        select_key = f"status_{app_id}"
+                        st.selectbox(
+                            "Status", 
+                            options=status_options, 
+                            index=default_index, 
+                            key=select_key,
+                            on_change=update_status,
+                            args=(app_id, select_key),
+                            label_visibility="collapsed"
+                        )
+                    with col_assets:
+                        with st.expander("View Application Assets"):
+                            formatted_preview = extract_text(app.get("assets_preview", ""))
+                            st.markdown(formatted_preview)
                 
                 st.markdown("<br>", unsafe_allow_html=True)
                 

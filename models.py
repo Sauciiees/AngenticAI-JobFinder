@@ -40,8 +40,19 @@ class Application(Base):
     user_id = Column(Integer, ForeignKey("users.id"))
     job_title = Column(String, nullable=True)
     company = Column(String, nullable=True)
+    logo_url = Column(String, nullable=True)
     status = Column(String, default="Applied")
     assets_preview = Column(Text)
     timestamp = Column(DateTime, default=datetime.utcnow)
-
     owner = relationship("User", back_populates="applications")
+
+class ChatSession(Base):
+    __tablename__ = "chat_sessions"
+
+    id = Column(Integer, primary_key=True, index=True)
+    user_id = Column(Integer, ForeignKey("users.id"))
+    session_id = Column(String, unique=True, index=True, nullable=False)
+    title = Column(String, default="New Chat")
+    created_at = Column(DateTime, default=datetime.utcnow)
+    
+    owner = relationship("User")
