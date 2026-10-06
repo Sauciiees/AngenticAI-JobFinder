@@ -413,6 +413,87 @@ def human_approval_node(state: State):
       )]
   }
 
+def auto_apply_node(state: State):
+  """Stage 4.5: Auto-Apply Agent.
+
+  Uses Playwright + Gemini Vision to autonomously fill out job application forms.
+  Runs in a separate thread to avoid asyncio conflicts.
+  Opens a visible browser window so the user can solve CAPTCHAs if needed.
+  """
+  scored_jobs = state.get("scored_jobs", [])
+  structured_profile = state.get("structured_profile", {})
+  user_id = state.get("user_id", "anonymous")
+  
+  if not scored_jobs:
+      print("Auto-Apply: No jobs to apply to.")
+      return {
+          "messages": [("system", "No jobs available for auto-apply.")],
+          "application_results": [],
+      }
+  
+  # Find user's CV file path
+  cv_filepath = ""
+  user_uploads_dir = os.path.join(os.path.dirname(os.path.dirname(__file__)), "uploads", user_id)
+  if os.path.exists(user_uploads_dir):
+      for f in os.listdir(user_uploads_dir):
+          if f.endswith(".pdf"):
+              cv_filepath = os.path.join(user_uploads_dir, f).replace("\\", "/")
+              break
+  
+  print(f"Auto-Apply: Starting for {len(scored_jobs)} job(s)...")
+  if cv_filepath:
+      print(f"Auto-Apply: Using CV at {cv_filepath}")
+  else:
+      print("Auto-Apply: No CV file found, will skip file upload fields.")
+  
+  # Run the auto-apply agent in a thread to avoid asyncio conflicts
+  from concurrent.futures import ThreadPoolExecutor
+  from tools.auto_apply_agent import auto_apply_to_jobs
+  
+  def run_apply():
+      return auto_apply_to_jobs(
+          jobs=scored_jobs,
+          user_profile=structured_profile,
+          cv_filepath=cv_filepath,
+      )
+  
+  with ThreadPoolExecutor(max_workers=1) as executor:
+      future = executor.submit(run_apply)
+      try:
+          results = future.result(timeout=600)  # 10 min max for all jobs
+      except Exception as e:
+          print(f"Auto-Apply thread error: {e}")
+          results = []
+  
+  # Summarize results
+  success_count = sum(1 for r in results if r.get("success"))
+  total = len(results)
+  
+  summary = f"Auto-Apply completed: {success_count}/{total} applications submitted successfully."
+  print(summary)
+  
+  # Build clean results for state
+  clean_results = []
+  for r in results:
+      job = r.get("job", {})
+      print(f"--- Action Log for {job.get('title')} ---")
+      for act in r.get("action_log", []):
+          print(f"  {act}")
+      clean_results.append({
+          "title": job.get("title", "Unknown"),
+          "company": job.get("company", "Unknown"),
+          "link": job.get("link", ""),
+          "success": r.get("success", False),
+          "final_status": r.get("final_status", "error"),
+          "steps_taken": r.get("steps_taken", 0),
+          "action_log": r.get("action_log", []),
+      })
+  
+  return {
+      "messages": [("system", summary)],
+      "application_results": clean_results,
+  }
+
 def application_tracker_node(state: State):
   """Stage 5: Application Tracker Agent.
 

@@ -618,11 +618,22 @@ with st.sidebar:
 
 # Get session_id from sidebar, or create one
 session_id = st.session_state.get("sidebar_session_id")
+
 if not session_id and st.session_state.get("page") == "finder":
-    res = api_post("/api/chat-sessions", json={"title": "New Chat"})
-    if res and res.status_code == 200:
-        session_id = res.json()["session_id"]
-        st.session_state["sidebar_session_id"] = session_id
+    # If sessions were fetched in the sidebar, try to use the most recent one
+    try:
+        if sessions and len(sessions) > 0:
+            session_id = sessions[0]["session_id"]
+            st.session_state["sidebar_session_id"] = session_id
+    except NameError:
+        pass
+    
+    # If still no session_id, create a new one
+    if not session_id:
+        res = api_post("/api/chat-sessions", json={"title": "New Chat"})
+        if res and res.status_code == 200:
+            session_id = res.json()["session_id"]
+            st.session_state["sidebar_session_id"] = session_id
 
 
 if st.session_state.get("page") == "finder":

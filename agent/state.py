@@ -16,3 +16,4 @@ class State(TypedDict):
   chat_response: str  # The LLM's conversational reply when route_intent is "chat"
   time_filter: str  # Serper time filter: "qdr:d" (24h), "qdr:w" (1 week), "qdr:m" (1 month)
   selected_jobs: List[Dict[str, Any]]  # Jobs the user selected from the card UI
+  application_results: List[Dict[str, Any]]  # Results from auto-apply agent (per job: success, status, log)

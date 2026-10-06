@@ -1,0 +1,29 @@
+{
+  "searchParameters": {
+    "q": "site:linkedin.com/jobs AI Engineer Bangkok",
+    "type": "search",
+    "num": 3,
+    "engine": "google"
+  },
+  "organic": [
+    {
+      "title": "Krungthai Bank hiring AI Engineer in Bangkok ...",
+      "link": "https://www.linkedin.com/jobs/view/4327718166/",
+      "snippet": "We are looking for an AI Engineer. In this role, you will design, build, and operate scalable AI and Machine Learning solutions , test, and deploy artificial ...",
+      "position": 1
+    },
+    {
+      "title": "164 Remote Ai Jobs In Thailand jobs in United States",
+      "link": "https://www.linkedin.com/jobs/remote-ai-jobs-in-thailand-jobs",
+      "snippet": "164 Remote Ai Jobs In Thailand jobs in United States. AI-powered job search. Business Analyst (Supply Analytics, Bangkok-based, Relocation provided) Lead ...",
+      "position": 2
+    },
+    {
+      "title": "Inteltion hiring Generative AI Engineer in Bangkok ...",
+      "link": "https://www.linkedin.com/jobs/view/4376704988/",
+      "snippet": "We are looking for a passionate AI Engineer who combines strong AI/ML foundations with a solid understanding of infrastructure, system design, and production ...",
+      "position": 3
+    }
+  ],
+  "credits": 1
+}

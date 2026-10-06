@@ -1,6 +1,7 @@
 from agent.nodes import (
     application_tracker_node,
     asset_tailoring_agent,
+    auto_apply_node,
     conversational_router,
     general_chat_node,
     human_approval_node,
@@ -35,6 +36,7 @@ workflow.add_node("tools", ToolNode(ALL_TOOLS))
 workflow.add_node("matching_screening_agent", matching_screening_agent)
 workflow.add_node("asset_tailoring_agent", asset_tailoring_agent)
 workflow.add_node("human_approval_node", human_approval_node)
+workflow.add_node("auto_apply_node", auto_apply_node)
 workflow.add_node("application_tracker_node", application_tracker_node)
 
 # 2. Entry point: always go to the router first
@@ -54,12 +56,13 @@ workflow.add_conditional_edges(
 workflow.add_edge("general_chat_node", END)
 
 # 5. Job search pipeline:
-#    Discovery → Selection (interrupt) → Matching → Tailoring → Human Review → Tracker
+#    Discovery -> Selection (interrupt) -> Matching -> Tailoring -> Human Review -> Auto Apply -> Tracker
 workflow.add_edge("job_discovery_agent", "job_selection_node")
 workflow.add_edge("job_selection_node", "matching_screening_agent")
 workflow.add_edge("matching_screening_agent", "asset_tailoring_agent")
 workflow.add_edge("asset_tailoring_agent", "human_approval_node")
-workflow.add_edge("human_approval_node", "application_tracker_node")
+workflow.add_edge("human_approval_node", "auto_apply_node")
+workflow.add_edge("auto_apply_node", "application_tracker_node")
 workflow.add_edge("application_tracker_node", END)
 
 # 6. Compile graph with checkpointer

@@ -181,6 +181,7 @@ async def start_job_search(
             "chat_response": "",
             "time_filter": req.time_filter,
             "selected_jobs": [],
+            "application_results": [],
         }
 
         # Run until the first interrupt
@@ -317,14 +318,30 @@ async def resume_job_search(
             
         assets_preview = assets_str[:500] + "..." if len(assets_str) > 500 else assets_str
         
+        application_results = final_state.get("application_results", [])
+        result_map = {f"{r.get('title')}_{r.get('company')}": r for r in application_results}
+        
         if req.jobs:
             for j in req.jobs:
+                key = f"{j.get('title')}_{j.get('company')}"
+                r = result_map.get(key, {})
+                
+                final_status = r.get("final_status", "Applied")
+                if final_status == "submitted":
+                    status = "Applied"
+                elif final_status == "captcha_timeout":
+                    status = "Requires Manual Intervention"
+                elif final_status in ["stuck", "error", "max_steps_reached", "no_url"]:
+                    status = f"Failed ({final_status})"
+                else:
+                    status = "Applied"
+                    
                 new_app = models.Application(
                     user_id=current_user.id,
                     job_title=j.get("title", "Unknown"),
                     company=j.get("company", "Unknown"),
                     logo_url=j.get("logo_url", ""),
-                    status="Applied",
+                    status=status,
                     assets_preview=assets_preview
                 )
                 db.add(new_app)
