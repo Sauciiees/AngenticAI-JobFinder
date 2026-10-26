@@ -202,7 +202,12 @@ input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
   display: inline-flex; align-items: center; gap: 10px;
   color: var(--text); text-decoration: none; font-size: 20px; font-weight: 400;
 }
-.mark { width: 26px; height: 26px; fill: var(--accent); }
+.mark { width: 26px; height: 26px; color: var(--accent); }
+
+/* The seeker mark: a J with a head and two motion lines, drawn in currentColor */
+.mk-j { fill: none; stroke: currentColor; stroke-width: 3; stroke-linecap: round; }
+.mk-head { fill: currentColor; }
+.mk-lines { fill: none; stroke: currentColor; stroke-width: 2.4; stroke-linecap: round; opacity: .55; }
 
 /* ---------- Auth ---------- */
 .auth { min-height: 100%; display: grid; place-items: center; padding: 48px 20px; }
@@ -343,7 +348,7 @@ input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
   padding: 12px 18px; border-radius: 24px 4px 24px 24px;
   background: var(--surface); white-space: pre-wrap; overflow-wrap: anywhere;
 }
-.msg-ai .who { width: 28px; height: 28px; flex: none; margin-top: 2px; fill: var(--accent); }
+.msg-ai .who { width: 28px; height: 28px; flex: none; margin-top: 2px; color: var(--accent); }
 .msg-ai .body { flex: 1; min-width: 0; overflow-wrap: anywhere; }
 .msg-ai.is-error .body { color: var(--text); }
 .err-line { display: flex; gap: 8px; align-items: center; color: var(--negative); font-weight: 500; }
@@ -365,9 +370,13 @@ input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
 
 /* Thinking */
 .thinking { display: flex; gap: 16px; align-items: center; color: var(--muted); }
-.thinking .who { width: 28px; height: 28px; fill: var(--accent); animation: spin 2.4s cubic-bezier(.5, 0, .5, 1) infinite; }
+.thinking .who { width: 28px; height: 28px; flex: none; color: var(--accent); overflow: visible; }
+/* While the agent works, the seeker is on the move: the head bobs and the motion lines pulse. */
+.thinking .mk-head { animation: seek-bob 1s cubic-bezier(.45, 0, .55, 1) infinite; }
+.thinking .mk-lines { animation: seek-lines 1s ease-in-out infinite; }
 .thinking-text { font-size: 15px; }
-@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes seek-bob { 50% { transform: translateY(-2px); } }
+@keyframes seek-lines { 0%, 100% { opacity: .2; transform: translateX(0); } 50% { opacity: .8; transform: translateX(1.5px); } }
 
 /* Agent blocks: job picker and review */
 .block { margin-left: 44px; display: grid; gap: 16px; }

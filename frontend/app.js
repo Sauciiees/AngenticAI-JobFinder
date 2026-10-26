@@ -27,14 +27,21 @@
     return el;
   }
   const icon = (name, cls = "") => h("span", { class: `ms ${cls}`.trim(), "aria-hidden": "true" }, name);
-  const sparkle = (cls = "who") => {
-    const svg = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+  /** The Job Finder mark, "the seeker": a J with a head above it and two motion lines. */
+  const logoMark = (cls = "who") => {
+    const NS = "http://www.w3.org/2000/svg";
+    const svg = document.createElementNS(NS, "svg");
     svg.setAttribute("viewBox", "0 0 24 24");
     svg.setAttribute("class", cls);
     svg.setAttribute("aria-hidden", "true");
-    const p = document.createElementNS("http://www.w3.org/2000/svg", "path");
-    p.setAttribute("d", "M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z");
-    svg.append(p);
+    const part = (tag, attrs) => {
+      const el = document.createElementNS(NS, tag);
+      for (const [k, v] of Object.entries(attrs)) el.setAttribute(k, v);
+      svg.append(el);
+    };
+    part("path", { class: "mk-j", d: "M13 9v6.5a5 5 0 0 1-10 0" });
+    part("circle", { class: "mk-head", cx: "13", cy: "4.3", r: "2.3" });
+    part("path", { class: "mk-lines", d: "M17.5 8.5h3.5M17.5 13h3.5" });
     return svg;
   };
 
@@ -570,7 +577,7 @@
 
   function renderMessage(m) {
     if (m.role === "user") return h("div", { class: "msg msg-user" }, h("div", { class: "bubble" }, m.content));
-    return h("div", { class: "msg msg-ai" }, sparkle(), h("div", { class: "body" }, renderMarkdown(m.content)));
+    return h("div", { class: "msg msg-ai" }, logoMark(), h("div", { class: "body" }, renderMarkdown(m.content)));
   }
 
   function jobRow(job, idx) {
@@ -749,7 +756,7 @@
 
     if (loading) {
       thread.append(h("div", { class: "msg msg-user" }, h("span", { class: "skeleton", style: "width:240px;height:46px;border-radius:24px" })));
-      thread.append(h("div", { class: "msg msg-ai" }, sparkle(),
+      thread.append(h("div", { class: "msg msg-ai" }, logoMark(),
         h("div", { class: "body", style: "display:grid;gap:10px" },
           h("span", { class: "skeleton", style: "width:90%;height:16px" }),
           h("span", { class: "skeleton", style: "width:70%;height:16px" }),
@@ -765,10 +772,10 @@
     }
 
     if (state.busy) {
-      thread.append(h("div", { class: "thinking", role: "status" }, sparkle(), h("span", { class: "thinking-text" }, state.busy)));
+      thread.append(h("div", { class: "thinking", role: "status" }, logoMark(), h("span", { class: "thinking-text" }, state.busy)));
     }
     if (state.chatError) {
-      thread.append(h("div", { class: "msg msg-ai is-error" }, sparkle(),
+      thread.append(h("div", { class: "msg msg-ai is-error" }, logoMark(),
         h("div", { class: "body", style: "display:grid;gap:8px;justify-items:start" },
           h("p", { class: "err-line" }, icon("error"), state.chatError.message),
           state.chatError.retry ? h("button", { class: "btn btn-outline", type: "button", onclick: state.chatError.retry }, icon("refresh"), "Try again") : null)));
