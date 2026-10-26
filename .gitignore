@@ -9,3 +9,9 @@ vector_db/
 *.pdf
 .taste-skill/
 browser_profile/user_*/
+
+# Runtime data (browser sessions, agent screenshots, LangGraph checkpoints, trackers)
+browser_profile/
+screenshots/
+checkpoints.sqlite*
+tracker_user_*.json
