@@ -53,7 +53,8 @@ langchain-core==1.6.3
 langchain-google-genai==4.4.0
 langchain-protocol==0.0.19
 langgraph==1.2.11
-langgraph-checkpoint==4.2.0
+langgraph-checkpoint==4.3.0
+langgraph-checkpoint-sqlite==3.1.2
 langgraph-prebuilt==1.1.0
 langgraph-sdk==0.4.4
 langsmith==0.12.6
