@@ -83,7 +83,8 @@ def general_chat_node(state: State):
   vector_results = vector_store.collection.get(
       where={"user_id": user_id}
   )
-  retrieved_chunks = vector_results.get("documents", [[]])[0]
+  # collection.get() returns a flat list of chunk strings (unlike .query(), which nests one list per query)
+  retrieved_chunks = vector_results.get("documents") or []
   actual_user_profile = "\n".join(retrieved_chunks) if retrieved_chunks else "No resume documents uploaded yet."
 
   prompt = f"""You are an expert Career Advisor and AI Assistant called "JobFinder AI". 

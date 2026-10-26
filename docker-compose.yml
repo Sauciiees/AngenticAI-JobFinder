@@ -14,16 +14,4 @@ services:
       - ./vector_db:/app/vector_db
     env_file:
       - .env
-
-  frontend:
-    build:
-      context: .
-      dockerfile: frontend.dockerfile
-    container_name: jobfinder_frontend
-    ports:
-      - "8501:8501"
-    depends_on:
-      - backend
-    environment:
-      # Tell Streamlit to talk to the backend container over the internal network
-      - BACKEND_URL=http://backend:8000
+    # The web frontend (frontend/) is served by this same container at http://localhost:8000

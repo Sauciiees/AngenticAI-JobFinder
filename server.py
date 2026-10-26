@@ -36,9 +36,9 @@ os.makedirs(UPLOAD_DIR, exist_ok=True)
 # 2. Mount static files so files can be accessed via URL (e.g. http://localhost:8000/uploads/...)
 app.mount("/uploads", StaticFiles(directory=UPLOAD_DIR), name="uploads")
 
-@app.get("/")
-async def root():
-    """Simple health check endpoint."""
+@app.get("/api/health")
+async def health():
+    """Simple health check endpoint. (The web frontend is served at "/".)"""
     return {"message": "🤖 Agentic AI Job Finder API is online and running!"}
 
 # Updated Pydantic Models to require user_id
@@ -683,3 +683,14 @@ def get_session_history(session_id: str, current_user: models.User = Depends(get
         "scored_jobs": values.get("scored_jobs", []),
         "tailored_assets": assets
     }
+
+# 3. Serve the web frontend (frontend/) at "/". Mounted last so every /api route above takes priority.
+class RevalidatedStaticFiles(StaticFiles):
+    """Static files that browsers re-check on every load (a cheap 304 when unchanged), so UI updates show up at once."""
+    async def get_response(self, path, scope):
+        response = await super().get_response(path, scope)
+        response.headers["Cache-Control"] = "no-cache"
+        return response
+
+FRONTEND_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "frontend")
+app.mount("/", RevalidatedStaticFiles(directory=FRONTEND_DIR, html=True), name="frontend")

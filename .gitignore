@@ -7,3 +7,4 @@ data/
 uploads/
 vector_db/
 *.pdf
+.taste-skill/

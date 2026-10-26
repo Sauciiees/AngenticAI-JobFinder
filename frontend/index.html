@@ -1,0 +1,133 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <title>Job Finder</title>
+  <meta name="color-scheme" content="light dark">
+  <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24'%3E%3Cpath fill='%230b57d0' d='M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z'/%3E%3C/svg%3E">
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Google+Sans:wght@400;500;700&display=swap">
+  <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Material+Symbols+Rounded:opsz,wght,FILL,GRAD@20..24,400,0..1,0&display=block">
+  <link rel="stylesheet" href="/styles.css">
+  <script>
+    // Apply the saved theme before first paint so the page never flashes the wrong one.
+    try {
+      var t = localStorage.getItem("jf-theme");
+      if (t === "light" || t === "dark") document.documentElement.setAttribute("data-theme", t);
+      if (localStorage.getItem("jf-rail") === "collapsed") document.documentElement.setAttribute("data-rail", "collapsed");
+    } catch (e) {}
+  </script>
+</head>
+<body>
+  <!-- Signed out -->
+  <div id="auth" class="auth" hidden>
+    <div class="auth-inner">
+      <a class="wordmark" href="#/" aria-label="Job Finder home">
+        <svg class="mark" viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c.6 5.4 4.6 9.4 10 10-5.4.6-9.4 4.6-10 10-.6-5.4-4.6-9.4-10-10 5.4-.6 9.4-4.6 10-10z"/></svg>
+        <span>Job Finder</span>
+      </a>
+      <h1 id="auth-title" class="auth-title">Sign in</h1>
+      <p class="auth-sub" id="auth-sub">Your AI agents search job boards, score each role against your CV and draft the application.</p>
+
+      <form id="auth-form" class="auth-form" novalidate>
+        <div class="field">
+          <label for="auth-user">Username</label>
+          <input id="auth-user" name="username" autocomplete="username" required>
+        </div>
+        <div class="field">
+          <label for="auth-pass">Password</label>
+          <input id="auth-pass" name="password" type="password" autocomplete="current-password" required aria-describedby="auth-pass-hint">
+          <p class="hint" id="auth-pass-hint" hidden>At least 6 characters.</p>
+        </div>
+        <div class="field" id="auth-confirm-field" hidden>
+          <label for="auth-confirm">Confirm password</label>
+          <input id="auth-confirm" name="confirm" type="password" autocomplete="new-password">
+        </div>
+        <p class="form-error" id="auth-error" role="alert" hidden></p>
+        <p class="form-ok" id="auth-ok" role="status" hidden></p>
+        <button class="btn btn-primary btn-block" id="auth-submit" type="submit">Sign in</button>
+      </form>
+      <p class="auth-switch">
+        <span id="auth-switch-text">New here?</span>
+        <button type="button" class="btn-text" id="auth-switch">Create an account</button>
+      </p>
+    </div>
+  </div>
+
+  <!-- Signed in -->
+  <div id="shell" class="shell" hidden>
+    <aside class="rail" id="rail" aria-label="Navigation">
+      <div class="rail-head">
+        <button class="icon-btn" id="rail-toggle" type="button" aria-label="Collapse menu" aria-expanded="true">
+          <span class="ms" aria-hidden="true">menu</span>
+        </button>
+      </div>
+
+      <a class="new-chat" href="#/chat" id="new-chat">
+        <span class="ms" aria-hidden="true">edit_square</span>
+        <span class="rail-text">New chat</span>
+      </a>
+
+      <nav class="recent" aria-labelledby="recent-label">
+        <h2 class="rail-label rail-text" id="recent-label">Recent</h2>
+        <ul id="chat-list" class="chat-list"></ul>
+        <p class="rail-empty rail-text" id="chat-list-empty" hidden>Your searches will show up here.</p>
+      </nav>
+
+      <div class="rail-foot">
+        <a class="rail-link" href="#/applications" data-nav="applications">
+          <span class="ms" aria-hidden="true">work_history</span>
+          <span class="rail-text">Applications</span>
+          <span class="count rail-text" id="apps-count" hidden></span>
+        </a>
+        <a class="rail-link" href="#/profile" data-nav="profile">
+          <span class="ms" aria-hidden="true">person</span>
+          <span class="rail-text">Profile</span>
+        </a>
+        <button class="rail-link" type="button" id="theme-toggle">
+          <span class="ms" aria-hidden="true" id="theme-icon">contrast</span>
+          <span class="rail-text" id="theme-label">Theme: system</span>
+        </button>
+        <button class="rail-link" type="button" id="sign-out">
+          <span class="ms" aria-hidden="true">logout</span>
+          <span class="rail-text">Sign out</span>
+        </button>
+      </div>
+    </aside>
+    <div class="scrim" id="scrim" hidden></div>
+
+    <div class="main">
+      <header class="topbar">
+        <button class="icon-btn only-phone" id="rail-open" type="button" aria-label="Open menu" aria-controls="rail">
+          <span class="ms" aria-hidden="true">menu</span>
+        </button>
+        <a class="wordmark" href="#/chat">
+          <span>Job Finder</span>
+        </a>
+        <span class="topbar-gap"></span>
+        <a class="avatar" href="#/profile" id="avatar" aria-label="Your profile"></a>
+      </header>
+      <main id="view" class="view" tabindex="-1"></main>
+    </div>
+  </div>
+
+  <dialog id="confirm" class="dialog" aria-labelledby="confirm-title">
+    <form method="dialog">
+      <h2 id="confirm-title"></h2>
+      <p id="confirm-body"></p>
+      <div class="dialog-actions">
+        <button class="btn btn-text-only" value="cancel">Cancel</button>
+        <button class="btn btn-danger" value="ok" id="confirm-ok">Delete</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div class="toast" id="toast" role="status" aria-live="polite" hidden></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js" defer></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.1.6/dist/purify.min.js" defer></script>
+  <script src="/app.js" defer></script>
+</body>
+</html>
