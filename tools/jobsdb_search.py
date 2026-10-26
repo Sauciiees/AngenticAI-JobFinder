@@ -18,7 +18,12 @@ def jobsdb_direct_search(keyword: str, location: str, num_jobs: int = 5):
             )
             page.route("**/*", lambda route: route.abort() if route.request.resource_type in ["image", "media", "font"] else route.continue_())
             page.goto(url, wait_until="domcontentloaded", timeout=15000)
-            page.wait_for_timeout(1000) # Give React time
+            # Give React time: cards render first and the company logos a moment later.
+            try:
+                page.wait_for_selector("article", timeout=8000)
+                page.wait_for_selector("article [data-automation='company-logo'] img", timeout=5000)
+            except Exception:
+                pass  # no logos on this page (or a slow load): carry on with what rendered
             
             cards = page.query_selector_all("article")
             for card in cards[:num_jobs]:
@@ -34,7 +39,13 @@ def jobsdb_direct_search(keyword: str, location: str, num_jobs: int = 5):
                     
                     snippet_el = card.query_selector("ul")
                     snippet = snippet_el.inner_text().replace("\n", " ") if snippet_el else ""
-                    
+
+                    # The card carries the advertiser's logo: an <img> inside the company-logo wrapper
+                    # (images are blocked, but its src is still set). Job pages have no JSON-LD, so the
+                    # scraper can't fill this in later.
+                    logo_el = card.query_selector("[data-automation='company-logo'] img")
+                    logo_url = (logo_el.get_attribute("src") or "") if logo_el else ""
+
                     if title and link:
                         jobs.append({
                             "title": title,
@@ -43,7 +54,7 @@ def jobsdb_direct_search(keyword: str, location: str, num_jobs: int = 5):
                             "link": link,
                             "platform": "JobsDB",
                             "date": "", # JobsDB doesn't easily show date on the card
-                            "logo_url": "" # Will be populated by the scraper later
+                            "logo_url": logo_url,  # empty when the advertiser has no branding
                         })
                 except Exception:
                     continue
