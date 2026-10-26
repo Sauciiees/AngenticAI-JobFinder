@@ -161,42 +161,39 @@ def job_search_agent(state: State):
 
   from tools.linkedin_search import linkedin_direct_search
   from tools.jobsdb_search import jobsdb_direct_search
-  from tools.job_tools import _serper_search_structured
-  
+  from tools.indeed_search import indeed_direct_search
+  from tools.jobbkk_search import jobbkk_direct_search
+
   all_jobs = []
-  
+
   # 1. LinkedIn (Direct Search for perfect data)
   safe_kw = search_keyword.encode('ascii', 'ignore').decode('ascii')
   print(f"Direct searching LinkedIn for {safe_kw}...")
   all_jobs.extend(linkedin_direct_search(search_keyword, search_location, time_filter, 10))
-  
-  # 2. JobsDB (Direct Search via Playwright in a separate thread)
-  print(f"Direct searching JobsDB for {safe_kw}...")
+
+  # 2. JobsDB, Indeed and JobBKK: direct searches via Playwright, each in its own thread
+  #    (the sync Playwright API can't run on this thread's event loop) and in parallel.
+  #    All three honour the location and the time filter.
+  print(f"Direct searching JobsDB, Indeed and JobBKK for {safe_kw}...")
   from concurrent.futures import ThreadPoolExecutor
-  with ThreadPoolExecutor(max_workers=1) as executor:
-      future = executor.submit(jobsdb_direct_search, search_keyword, search_location, 5)
-      try:
-          all_jobs.extend(future.result())
-      except Exception as e:
-          print(f"Failed to run JobsDB search thread: {e}")
-  
-  # 3. Other platforms (via Serper)
-  platforms = [
-      ("indeed.com/viewjob", "Indeed"),
-      ("jobbkk.com/jobs/detail", "JobBKK"),
+  direct_searches = [
+      ("JobsDB", jobsdb_direct_search),
+      ("Indeed", indeed_direct_search),
+      ("JobBKK", jobbkk_direct_search),
   ]
-  
-  for site, platform_name in platforms:
-    results = _serper_search_structured(
-        keyword=search_keyword,
-        location=search_location,
-        site=site,
-        platform_name=platform_name,
-        time_filter=time_filter,
-        num=5, # Reduce to 5 for others to keep cards clean
-    )
-    all_jobs.extend(results)
-    
+  with ThreadPoolExecutor(max_workers=len(direct_searches)) as executor:
+      futures = [
+          (name, executor.submit(search, search_keyword, search_location, 5, time_filter))
+          for name, search in direct_searches
+      ]
+      for name, future in futures:
+          try:
+              found = future.result()
+              print(f"  {name}: {len(found)} jobs")
+              all_jobs.extend(found)
+          except Exception as e:
+              print(f"Failed to run {name} search thread: {e}")
+
   from tools.scraper import enrich_jobs_with_scraper
   print("Enriching jobs with async scraper...")
   all_jobs = enrich_jobs_with_scraper(all_jobs)
