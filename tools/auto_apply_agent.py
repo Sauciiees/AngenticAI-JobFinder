@@ -3,19 +3,17 @@ Auto-Apply Browser Agent
 ========================
 Uses Playwright + Gemini Vision to autonomously fill out job application forms.
 
-Architecture:
-1. LABEL: Inject numbered labels onto every interactive element on the page
-2. SCREENSHOT: Capture the labeled page as a PNG
-3. REASON: Send screenshot to Gemini Vision LLM to decide the next action
-4. ACT: Execute the action (click, type, upload, select, etc.) via Playwright
-5. LOOP: Repeat until form is submitted or max steps reached
+Architecture (pure vision: nothing is injected into the page):
+1. SCREENSHOT: Capture the page exactly as the applicant would see it
+2. REASON: Gemini Vision picks the next action and points at its target on the screenshot
+3. ACT: Real mouse and keyboard input at that point via Playwright (click, type, select, upload)
+4. LOOP: Repeat until form is submitted or max steps reached
 
 Runs in headless=False mode so the user can intervene for CAPTCHAs.
 """
 
 import os
 import json
-import base64
 import time
 import re
 from pathlib import Path
@@ -27,96 +25,8 @@ MAX_ACTIONS = 30
 PROFILE_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "browser_profile")
 SCREENSHOT_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "screenshots")
 
-# JavaScript to inject numbered labels on every interactive element
-LABEL_INJECTION_JS = """
-() => {
-    // Create a container in the Top Layer using popover to bypass ALL z-index and native <dialog> overlay issues
-    let container = document.getElementById('agy-label-container');
-    if (container) container.remove();
-    
-    container = document.createElement('div');
-    container.id = 'agy-label-container';
-    container.popover = 'manual'; // Puts it in the Top Layer
-    container.style.cssText = 'position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 2147483647; background: transparent; border: none; padding: 0; margin: 0; overflow: visible;';
-    document.body.appendChild(container);
-    try { container.showPopover(); } catch(e) {}
-
-    const interactiveSelectors = [
-        'input:not([type="hidden"])',
-        'textarea',
-        'select',
-        'button',
-        'a[href]',
-        '[role="button"]',
-        '[role="link"]',
-        '[role="checkbox"]',
-        '[role="radio"]',
-        '[role="combobox"]',
-        '[role="listbox"]',
-        '[role="menuitem"]',
-        '[role="tab"]',
-        '[contenteditable="true"]',
-        'label[for]',
-    ];
-
-    const elements = document.querySelectorAll(interactiveSelectors.join(','));
-    let id = 1;
-    const elementMap = {};
-    window.__agyElements = {}; // Store direct references to DOM nodes
-
-    elements.forEach(el => {
-        const isFileInput = el.tagName.toLowerCase() === 'input' && el.getAttribute('type') === 'file';
-        
-        const rect = el.getBoundingClientRect();
-        
-        // Draw labels for all elements that have a valid coordinate
-        if (rect.width === 0 && rect.height === 0) return;
-        if (rect.top > window.innerHeight || rect.bottom < 0) return;
-        if (rect.left > window.innerWidth || rect.right < 0) return;
-
-        // Create label
-        if (!isFileInput) {
-            const label = document.createElement('div');
-            label.textContent = id;
-            label.style.cssText = `
-                position: absolute;
-                top: ${rect.top + window.scrollY - 10}px;
-                left: ${rect.left + window.scrollX - 10}px;
-                background: #FF0000;
-                color: white;
-                font-size: 13px;
-                font-weight: bold;
-                padding: 2px 6px;
-                border-radius: 4px;
-                pointer-events: none;
-                font-family: sans-serif;
-                box-shadow: 0 2px 4px rgba(0,0,0,0.5);
-                border: 1px solid white;
-            `;
-            container.appendChild(label);
-        }
-
-        // Store element info
-        window.__agyElements[id] = el;
-        elementMap[id] = {
-            tag: el.tagName.toLowerCase(),
-            type: el.getAttribute('type') || '',
-            name: el.getAttribute('name') || '',
-            id: el.getAttribute('id') || '',
-            placeholder: el.getAttribute('placeholder') || '',
-            text: (el.innerText || '').substring(0, 80),
-            value: el.value || '',
-            ariaLabel: el.getAttribute('aria-label') || '',
-        };
-        id++;
-    });
-
-    return elementMap;
-}
-"""
-
-# JavaScript to get the element map without re-injecting labels
-GET_ELEMENT_MAP_JS = "() => window.__agyElementMap || {}"
+# The vision model answers with points on a 0-1000 grid over the screenshot ([y, x], Gemini's convention).
+POINT_SCALE = 1000
 
 
 def _get_vision_llm():
@@ -128,14 +38,8 @@ def _get_vision_llm():
     return client
 
 
-def _screenshot_to_base64(screenshot_bytes: bytes) -> str:
-    """Convert screenshot bytes to base64 string."""
-    return base64.b64encode(screenshot_bytes).encode("utf-8").decode("utf-8")
-
-
 def _build_vision_prompt(
     user_profile: dict,
-    element_map: dict,
     action_history: list,
     error_message: str = "",
     cv_filepath: str = "",
@@ -162,22 +66,8 @@ def _build_vision_prompt(
     if error_message:
         error_text = f"\n!! PREVIOUS ACTION FAILED: {error_message}\nPlease try a different approach.\n"
     
-    # Compact element map for context
-    elem_summary = ""
-    for eid, info in element_map.items():
-        parts = [f"[{eid}] <{info['tag']}"]
-        if info.get('type'): parts.append(f" type={info['type']}")
-        if info.get('placeholder'): parts.append(f" placeholder=\"{info['placeholder']}\"")
-        if info.get('name'): parts.append(f" name=\"{info['name']}\"")
-        if info.get('ariaLabel'): parts.append(f" aria-label=\"{info['ariaLabel']}\"")
-        if info.get('text') and info['tag'] in ['button', 'a', 'label']:
-            parts.append(f" text=\"{info['text'][:50]}\"")
-        if info.get('value'):
-            parts.append(f" value=\"{info['value'][:30]}\"")
-        parts.append(">")
-        elem_summary += "".join(parts) + "\n"
-    
-    return f"""You are an AI agent filling out a job application form in a web browser.
+    return f"""You are an AI agent filling out a job application form in a web browser. You see a screenshot of
+the browser and act on it with a mouse and keyboard.
 
 APPLICANT INFORMATION (use this data to fill forms):
 - Full Name: {name}
@@ -193,11 +83,15 @@ APPLICANT INFORMATION (use this data to fill forms):
 {error_text}
 {history_text}
 
-INTERACTIVE ELEMENTS ON THE PAGE (each has a red numbered label visible in the screenshot):
-{elem_summary}
+HOW TO POINT:
+Locate the element you want to act on in the screenshot and give the CENTER of it as "point": [y, x],
+normalized to 0-{POINT_SCALE} (top-left is [0, 0], bottom-right is [{POINT_SCALE}, {POINT_SCALE}]).
+- For "type", point inside the empty input box itself, not at its label.
+- For checkboxes and radio buttons, point at the box or circle (or its label text).
+- For a custom dropdown that opens a list, "click" it first; on the next step "click" the option.
 
 INSTRUCTIONS:
-1. Look at the screenshot. Each interactive element has a red numbered label.
+1. Look at the screenshot carefully, including any dialog or modal in front of the page.
 2. Decide the single best NEXT action to progress through the application form.
 3. CRITICAL: If you do not see the expected "Next", "Review", or "Submit Application" button on the screen, it is likely off-screen. Use the "scroll_down" action to scroll the page and look for it! Do NOT guess random elements.
 4. CRITICAL: If the "Review" or "Submit" button is visible but GREYED OUT (disabled), it means you missed a required field! Look carefully at all empty input fields and fill them out.
@@ -212,128 +106,131 @@ INSTRUCTIONS:
 10. Do NOT re-fill fields that already have correct values.
 
 Respond with EXACTLY ONE JSON object (no markdown, no explanation):
-{{"action": "<action_type>", "element_id": <number>, "value": "<text_to_type>"}}
+{{"action": "<action_type>", "point": [y, x], "target": "<short description of what you are pointing at>", "value": "<text>"}}
 
 Valid action types:
-- "click": Click element. No "value" needed.
-- "type": Clear and type into input/textarea. Provide "value".
-- "select": Select dropdown option. Provide "value" with option text.
-- "upload": Upload file. Provide "value" with file path.
-- "scroll_down": Scroll page down. No element_id or value needed.
-- "scroll_up": Scroll page up. No element_id or value needed.
-- "captcha": Pause for human to solve CAPTCHA. No element_id or value needed.
-- "login_required": The site wants the applicant to sign in first. Stop. No element_id or value needed.
-- "done": Application submitted successfully. No element_id or value needed.
-- "stuck": Cannot proceed further. No element_id or value needed.
+- "click": Click at "point". No "value" needed.
+- "type": Clear the input at "point" and type "value".
+- "select": Open the native dropdown at "point" and choose the option whose text is "value".
+- "upload": Click the upload/attach button at "point" and attach the CV. "value" is the CV file path.
+- "scroll_down" / "scroll_up": Scroll. Give "point" inside the area to scroll (e.g. a modal), or omit it for the page.
+- "captcha": Pause for human to solve CAPTCHA. No point or value needed.
+- "login_required": The site wants the applicant to sign in first. Stop. No point or value needed.
+- "done": Application submitted successfully. No point or value needed.
+- "stuck": Cannot proceed further. No point or value needed.
 
 Respond with ONLY the JSON object."""
 
 
 def _parse_llm_action(response_text: str) -> dict:
     """Parse the LLM's JSON action response."""
+    text = (response_text or "").strip()
+    candidates = [text]
+    match = re.search(r'\{.*\}', text, re.DOTALL)  # tolerate a markdown fence or stray words around it
+    if match:
+        candidates.append(match.group(0))
+    for candidate in candidates:
+        try:
+            action = json.loads(candidate)
+            if isinstance(action, list) and action:  # some models wrap the object in a list
+                action = action[0]
+            if isinstance(action, dict):
+                return action
+        except Exception:
+            pass
+    return {"action": "stuck", "reason": f"Failed to parse LLM response: {text[:200]}"}
+
+
+def _to_pixels(page, point) -> tuple:
+    """Converts the model's [y, x] point on the 0-1000 grid into viewport pixels."""
+    if not (isinstance(point, (list, tuple)) and len(point) == 2):
+        raise ValueError(f"expected point [y, x], got {point!r}")
+    y, x = float(point[0]), float(point[1])
+    viewport = page.viewport_size or {"width": 1280, "height": 900}
+    px = min(max(x, 0), POINT_SCALE) / POINT_SCALE * (viewport["width"] - 1)
+    py = min(max(y, 0), POINT_SCALE) / POINT_SCALE * (viewport["height"] - 1)
+    return px, py
+
+
+def _mark_screenshot(screenshot_path: str, page, point) -> None:
+    """Draws where the agent acted onto the saved screenshot file (never onto the page), for debugging."""
     try:
-        # Try to extract JSON from response
-        match = re.search(r'\{[^}]+\}', response_text, re.DOTALL)
-        if match:
-            action = json.loads(match.group(0))
-            return action
-    except Exception:
-        pass
-    return {"action": "stuck", "reason": f"Failed to parse LLM response: {response_text[:200]}"}
+        from PIL import Image, ImageDraw
+        x, y = _to_pixels(page, point)
+        img = Image.open(screenshot_path).convert("RGB")
+        scale = img.width / (page.viewport_size or {"width": img.width})["width"]
+        x, y, r = x * scale, y * scale, 14 * scale
+        draw = ImageDraw.Draw(img)
+        draw.ellipse([x - r, y - r, x + r, y + r], outline=(255, 0, 0), width=max(2, int(3 * scale)))
+        draw.line([x - r * 1.6, y, x + r * 1.6, y], fill=(255, 0, 0), width=max(1, int(2 * scale)))
+        draw.line([x, y - r * 1.6, x, y + r * 1.6], fill=(255, 0, 0), width=max(1, int(2 * scale)))
+        img.save(screenshot_path)
+    except Exception as e:
+        print(f"Could not mark screenshot: {e}")
 
 
-def _execute_action(page, action: dict, element_map: dict) -> str:
-    """Execute a single action on the Playwright page. Returns error message or empty string."""
+def _execute_action(page, action: dict, cv_filepath: str = "") -> str:
+    """Execute one action with real mouse and keyboard input at the model's point. Returns an error or ""."""
     action_type = action.get("action", "")
-    element_id = action.get("element_id")
-    value = action.get("value", "")
-    
-    # We use page.evaluate to execute directly on the DOM node to bypass React stripping attributes
+    value = str(action.get("value") or "")
+    point = action.get("point")
+
     try:
+        if action_type in ("click", "type", "select", "upload"):
+            x, y = _to_pixels(page, point)
+
         if action_type == "click":
-            # Temporarily re-add the attribute in case React stripped it, then use Playwright's robust click
-            # which automatically handles scrolling, waiting for stability, and actionability checks
-            page.evaluate(f"window.__agyElements[{element_id}].scrollIntoView({{behavior: 'auto', block: 'center'}})")
-            page.evaluate(f"window.__agyElements[{element_id}].setAttribute('data-agy-id', '{element_id}')")
-            el = page.locator(f'[data-agy-id="{element_id}"]')
-            el.click(timeout=5000)
+            page.mouse.click(x, y)
             return ""
-            
+
         elif action_type == "type":
-            page.evaluate(f"window.__agyElements[{element_id}].scrollIntoView({{behavior: 'auto', block: 'center'}})")
-            page.wait_for_timeout(500)
-            # Use Playwright locator for typing to simulate actual keystrokes
-            # Since React might strip data-agy-id, we temporarily re-add it
-            page.evaluate(f"window.__agyElements[{element_id}].setAttribute('data-agy-id', '{element_id}')")
-            el = page.locator(f'[data-agy-id="{element_id}"]')
-            el.click(timeout=3000)
-            el.fill(value, timeout=5000)
+            page.mouse.click(x, y)
+            page.wait_for_timeout(200)
+            page.keyboard.press("ControlOrMeta+A")  # clear whatever is already in the field
+            page.keyboard.press("Backspace")
+            page.keyboard.type(value, delay=15)
             return ""
-            
+
         elif action_type == "select":
-            page.evaluate(f"window.__agyElements[{element_id}].scrollIntoView({{behavior: 'auto', block: 'center'}})")
-            page.wait_for_timeout(500)
-            page.evaluate(f"window.__agyElements[{element_id}].setAttribute('data-agy-id', '{element_id}')")
-            el = page.locator(f'[data-agy-id="{element_id}"]')
-            try:
-                el.select_option(label=value, timeout=5000)
-            except Exception:
-                el.select_option(value=value, timeout=5000)
+            # Native <select>: open it, type the option's text to jump to it, confirm with Enter.
+            page.mouse.click(x, y)
+            page.wait_for_timeout(300)
+            page.keyboard.type(value, delay=30)
+            page.keyboard.press("Enter")
             return ""
-            
+
         elif action_type == "upload":
-            filepath = value
+            # Always attach the applicant's own CV, whatever path the model wrote.
+            filepath = cv_filepath or value
             if not (filepath and os.path.exists(filepath)):
-                return f"File not found: {filepath}"
-                
-            box = page.evaluate(f"""(() => {{
-                const el = window.__agyElements[{element_id}];
-                const rect = el.getBoundingClientRect();
-                return {{x: rect.left + rect.width / 2, y: rect.top + rect.height / 2}};
-            }})()""")
-            
+                return f"No CV file to upload (looked for: {filepath or 'nothing'})"
             try:
-                # Try clicking the element and waiting for a file chooser (works for buttons)
-                with page.expect_file_chooser(timeout=3000) as fc_info:
-                    if box:
-                        page.mouse.click(box['x'], box['y'])
-                    else:
-                        page.evaluate(f"window.__agyElements[{element_id}].click()")
-                file_chooser = fc_info.value
-                file_chooser.set_files(filepath)
+                with page.expect_file_chooser(timeout=4000) as fc_info:
+                    page.mouse.click(x, y)
+                fc_info.value.set_files(filepath)
                 return ""
             except Exception:
-                # Fallback: try setting input files directly if it's an input element
-                try:
-                    page.evaluate(f"window.__agyElements[{element_id}].setAttribute('data-agy-id', '{element_id}')")
-                    el = page.locator(f'[data-agy-id="{element_id}"]')
-                    el.set_input_files(filepath, timeout=3000)
-                    return ""
-                except Exception as e:
-                    return f"Failed to upload: {str(e)}"
-                
-        elif action_type == "scroll_down":
-            viewport = page.viewport_size
-            if viewport:
-                page.mouse.move(viewport['width'] / 2, viewport['height'] / 2)
-            page.mouse.wheel(0, 500)
+                return "Clicking there did not open a file picker. Point at the upload/attach button itself."
+
+        elif action_type in ("scroll_down", "scroll_up"):
+            # Scroll where the model pointed (e.g. inside a modal), or the middle of the page.
+            if point:
+                x, y = _to_pixels(page, point)
+            else:
+                viewport = page.viewport_size or {"width": 1280, "height": 900}
+                x, y = viewport["width"] / 2, viewport["height"] / 2
+            page.mouse.move(x, y)
+            page.mouse.wheel(0, 500 if action_type == "scroll_down" else -500)
             return ""
-            
-        elif action_type == "scroll_up":
-            viewport = page.viewport_size
-            if viewport:
-                page.mouse.move(viewport['width'] / 2, viewport['height'] / 2)
-            page.mouse.wheel(0, -500)
-            return ""
-            
-        elif action_type in ["captcha", "done", "stuck"]:
+
+        elif action_type in ["captcha", "done", "stuck", "login_required"]:
             return ""  # These are handled by the main loop
-            
+
         else:
             return f"Unknown action type: {action_type}"
-            
+
     except Exception as e:
-        return f"Action failed on element [{element_id}]: {str(e)[:200]}"
+        return f"Action failed at {point}: {str(e)[:200]}"
 
 
 def auto_apply_to_job(
@@ -413,34 +310,22 @@ def auto_apply_to_job(
                 if on_status_update:
                     on_status_update(step, f"Step {step}/{MAX_ACTIONS}: Analyzing page...")
                 
-                # 1. LABEL: Inject numbered labels
+                # 1. SCREENSHOT: Capture the page as it is (after letting any navigation settle)
                 try:
-                    element_map = page.evaluate(LABEL_INJECTION_JS)
-                except Exception as e:
-                    print(f"Label injection failed: {e}")
-                    element_map = {}
-                
-                if not element_map:
-                    # Page might have navigated, wait and retry
-                    page.wait_for_timeout(2000)
-                    try:
-                        element_map = page.evaluate(LABEL_INJECTION_JS)
-                    except Exception:
-                        element_map = {}
-                
-                # 2. SCREENSHOT: Capture the labeled page
+                    page.wait_for_load_state("domcontentloaded", timeout=5000)
+                except Exception:
+                    pass
                 screenshot_path = os.path.join(SCREENSHOT_DIR, f"step_{step}.png")
                 screenshot_bytes = page.screenshot(full_page=False)
                 with open(screenshot_path, "wb") as f:
                     f.write(screenshot_bytes)
                 result["screenshot_path"] = screenshot_path
                 
-                # 3. REASON: Send to Gemini Vision
+                # 2. REASON: Send the screenshot to Gemini Vision, which points at its target
                 error_msg = action_history[-1].split(" | Error: ")[1] if action_history and "| Error:" in action_history[-1] else ""
-                
+
                 prompt = _build_vision_prompt(
                     user_profile=user_profile,
-                    element_map=element_map,
                     action_history=action_history,
                     error_message=error_msg,
                     cv_filepath=cv_filepath,
@@ -458,6 +343,7 @@ def auto_apply_to_job(
                             ),
                             prompt,
                         ],
+                        config=genai.types.GenerateContentConfig(response_mime_type="application/json"),
                     )
                     llm_response = response.text
                 except Exception as e:
@@ -465,21 +351,24 @@ def auto_apply_to_job(
                     action_history.append(f"Step {step}: Vision LLM failed - {str(e)[:100]}")
                     continue
                 
-                # 4. PARSE: Extract action from LLM response
+                # 3. PARSE: Extract action from LLM response
                 action = _parse_llm_action(llm_response)
                 action_type = action.get("action", "stuck")
-                
+
+                # The history the model reads back says what it aimed at, not just where.
                 action_desc = f"Step {step}: {action_type}"
-                if action.get("element_id"):
-                    action_desc += f" on [{action['element_id']}]"
+                if action.get("target"):
+                    action_desc += f" on \"{str(action['target'])[:60]}\""
+                if action.get("point"):
+                    action_desc += f" at {action['point']}"
                 if action.get("value"):
-                    safe_val = action['value'][:50].encode('ascii', 'ignore').decode('ascii')
+                    safe_val = str(action['value'])[:50].encode('ascii', 'ignore').decode('ascii')
                     action_desc += f" value=\"{safe_val}\""
-                
+
                 if on_status_update:
                     on_status_update(step, action_desc)
-                
-                # 5. HANDLE SPECIAL ACTIONS
+
+                # HANDLE SPECIAL ACTIONS
                 if action_type == "done":
                     result["success"] = True
                     result["final_status"] = "submitted"
@@ -513,8 +402,10 @@ def auto_apply_to_job(
                     result["action_log"] = action_history
                     break
                 
-                # 6. ACT: Execute the action
-                error = _execute_action(page, action, element_map)
+                # 4. ACT: Real mouse/keyboard input at the model's point; mark it on the saved screenshot
+                if action.get("point"):
+                    _mark_screenshot(screenshot_path, page, action["point"])
+                error = _execute_action(page, action, cv_filepath)
                 if error:
                     action_desc += f" | Error: {error}"
                 
