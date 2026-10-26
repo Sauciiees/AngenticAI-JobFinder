@@ -1,5 +1,7 @@
+import os
 import jwt
 from datetime import datetime, timedelta
+from dotenv import load_dotenv
 from passlib.context import CryptContext
 from fastapi import Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordBearer
@@ -9,7 +11,14 @@ from database import get_db
 import models
 
 # Security settings
-SECRET_KEY = "your-super-secret-jwt-key"
+# The signing secret lives in .env (server.py imports this module before it loads .env, so load it here).
+load_dotenv()
+SECRET_KEY = os.getenv("JWT_SECRET_KEY")
+if not SECRET_KEY or len(SECRET_KEY) < 32:
+    raise RuntimeError(
+        "JWT_SECRET_KEY is missing or too short in .env. Generate one with: "
+        'python -c "import secrets; print(secrets.token_urlsafe(48))"'
+    )
 ALGORITHM = "HS256"
 ACCESS_TOKEN_EXPIRE_MINUTES = 1440  # 24 hours
 
