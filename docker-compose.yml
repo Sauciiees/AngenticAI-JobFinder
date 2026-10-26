@@ -1,5 +1,3 @@
-version: '3.8'
-
 services:
   backend:
     build:
@@ -7,11 +5,25 @@ services:
       dockerfile: backend.dockerfile
     container_name: jobfinder_backend
     ports:
-      - "8000:8000"
+      # Bound to this computer only: the browser view can control your signed-in job-board sessions.
+      - "127.0.0.1:8000:8000"   # web app and API: http://localhost:8000
+      - "127.0.0.1:6080:6080"   # live browser view (sign-in, auto-apply, CAPTCHAs)
     volumes:
       - ./data:/app/data
       - ./uploads:/app/uploads
       - ./vector_db:/app/vector_db
+      - ./screenshots:/app/screenshots
+      # Job-board sign-ins live in a Docker volume: Linux Chrome can't reuse a Windows profile
+      # (and Chromium's profile lock doesn't work on Windows bind mounts).
+      - browser_profiles:/app/browser_profile
     env_file:
       - .env
+    environment:
+      - CHECKPOINT_DB=/app/data/checkpoints.sqlite
+      - BROWSER_VIEWER_URL=http://localhost:6080/vnc.html?autoconnect=1&resize=scale
+    shm_size: "1gb"  # Chromium needs more shared memory than Docker's 64 MB default
+    restart: unless-stopped
     # The web frontend (frontend/) is served by this same container at http://localhost:8000
+
+volumes:
+  browser_profiles:

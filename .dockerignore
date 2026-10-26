@@ -8,3 +8,9 @@ jobfinder.db
 *.pdf
 .env
 .gitignore
+browser_profile/
+screenshots/
+checkpoints.sqlite*
+data/
+.taste-skill/
+scratch/

@@ -178,6 +178,7 @@
     assets: "",
     selected: new Set(),
     boards: null,    // job-board sign-in status, from /api/job-boards
+    viewerUrl: null, // in Docker: the live view of the container's browser (noVNC), from /api/config
     busy: null,      // label while an agent call is running
     chatError: null, // { message, retry }
     pending: null,   // user message shown while waiting
@@ -427,9 +428,18 @@
   /** Opens the board's sign-in window on this computer and waits for the user. Resolves to true when signed in. */
   async function signInBoard(board, btn, note) {
     btn.disabled = true;
-    note.textContent = board.can_verify
-      ? `A ${board.name} window opened on this computer. Sign in there and it closes by itself.`
-      : `A ${board.name} window opened on this computer. Sign in there, then close the window.`;
+    if (state.viewerUrl) {
+      // Docker: the window opens on the container's virtual screen; show it in a tab (opened in the
+      // click itself so the popup isn't blocked).
+      window.open(state.viewerUrl, "jobfinder-browser");
+      note.textContent = board.can_verify
+        ? `${board.name} opened in the browser view tab. Sign in there and it closes by itself.`
+        : `${board.name} opened in the browser view tab. Sign in there, then close its tab with Ctrl+W.`;
+    } else {
+      note.textContent = board.can_verify
+        ? `A ${board.name} window opened on this computer. Sign in there and it closes by itself.`
+        : `A ${board.name} window opened on this computer. Sign in there, then close the window.`;
+    }
     try {
       const r = await api("POST", `/api/job-boards/${board.key}/sign-in`);
       let ok = r.signed_in;
@@ -772,7 +782,11 @@
     }
 
     if (state.busy) {
-      thread.append(h("div", { class: "thinking", role: "status" }, logoMark(), h("span", { class: "thinking-text" }, state.busy)));
+      // While auto-apply runs in Docker, offer the live view so CAPTCHAs can be solved there.
+      const watch = state.viewerUrl && state.busy.startsWith("Applying")
+        ? h("a", { href: state.viewerUrl, target: "jobfinder-browser", rel: "noopener" }, "Watch the browser")
+        : null;
+      thread.append(h("div", { class: "thinking", role: "status" }, logoMark(), h("span", { class: "thinking-text" }, state.busy), watch));
     }
     if (state.chatError) {
       thread.append(h("div", { class: "msg msg-ai is-error" }, logoMark(),
@@ -1229,6 +1243,7 @@
     $("#auth").hidden = true;
     $("#shell").hidden = false;
     renderAvatar();
+    api("GET", "/api/config").then((c) => { state.viewerUrl = c?.browser_viewer_url || null; }).catch(() => {});
     Promise.all([loadProfile(), loadSessions(), loadAppsCount()]).then(() => {
       // Redraw the greeting with the user's name once the profile is in (new chat only).
       if (route().name === "chat" && !state.chatId && !state.busy && !state.pending) renderChat();

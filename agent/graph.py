@@ -69,7 +69,10 @@ workflow.add_edge("application_tracker_node", END)
 import sqlite3
 from langgraph.checkpoint.sqlite import SqliteSaver
 
-# Create or connect to the checkpoint database
-conn = sqlite3.connect("checkpoints.sqlite", check_same_thread=False)
+# Create or connect to the checkpoint database. It lives in data/ beside jobfinder.db, so a local run
+# and the Docker container (which mounts data/) share the same chat history.
+import os
+os.makedirs("data", exist_ok=True)
+conn = sqlite3.connect(os.getenv("CHECKPOINT_DB", "data/checkpoints.sqlite"), check_same_thread=False)
 memory = SqliteSaver(conn)
 app = workflow.compile(checkpointer=memory)

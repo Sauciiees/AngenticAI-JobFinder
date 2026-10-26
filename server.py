@@ -42,6 +42,12 @@ async def health():
     """Simple health check endpoint. (The web frontend is served at "/".)"""
     return {"message": "🤖 Agentic AI Job Finder API is online and running!"}
 
+@app.get("/api/config")
+async def frontend_config():
+    """Settings the web app needs. browser_viewer_url is set in Docker, where the visible browser
+    windows (job-board sign-in, auto-apply) run on a virtual screen shown through noVNC."""
+    return {"browser_viewer_url": os.getenv("BROWSER_VIEWER_URL") or None}
+
 # Updated Pydantic Models to require user_id
 class SearchRequest(BaseModel):
     session_id: str
