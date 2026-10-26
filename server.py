@@ -24,6 +24,7 @@ load_dotenv()
 models.Base.metadata.create_all(bind=engine)
 
 from agent.graph import app as langgraph_app
+from tools import job_boards
 from agent.parser import parse_and_store_document
 from agent.vector_store import vector_store
 
@@ -293,9 +294,20 @@ async def resume_job_search(
     db: Session = Depends(get_db)  # <-- INJECT DATABASE SESSION
 ):
     """Resumes the paused LangGraph agent and SAVES the result to SQLite."""
+    config = {"configurable": {"thread_id": req.session_id}}
+
+    # 0. The agent never logs in: the user must have signed in to each job board themselves first.
+    if req.feedback == "approve":
+        pending_jobs = langgraph_app.get_state(config).values.get("scored_jobs", []) or req.jobs or []
+        missing = job_boards.missing_sign_ins(f"user_{current_user.id}", [j.get("link", "") for j in pending_jobs])
+        if missing:
+            names = ", ".join(job_boards.BOARDS[b]["name"] for b in missing)
+            raise HTTPException(status_code=409, detail={
+                "message": f"Sign in to {names} first, so the agent can apply with your own account.",
+                "boards": missing,
+            })
+
     try:
-        config = {"configurable": {"thread_id": req.session_id}}
-        
         # 1. Resume the agent with the user's approval
         for event in langgraph_app.stream(Command(resume=req.feedback), config, stream_mode="values"):
             pass
@@ -331,6 +343,8 @@ async def resume_job_search(
                     status = "Applied"
                 elif final_status == "captcha_timeout":
                     status = "Requires Manual Intervention"
+                elif final_status == "login_required":
+                    status = "Sign-in needed"
                 elif final_status in ["stuck", "error", "max_steps_reached", "no_url"]:
                     status = f"Failed ({final_status})"
                 else:
@@ -683,6 +697,40 @@ def get_session_history(session_id: str, current_user: models.User = Depends(get
         "scored_jobs": values.get("scored_jobs", []),
         "tailored_assets": assets
     }
+
+class BoardConfirmRequest(BaseModel):
+    signed_in: bool
+
+def _board_or_404(board: str) -> str:
+    if board not in job_boards.BOARDS:
+        raise HTTPException(status_code=404, detail="Unknown job board")
+    return board
+
+@app.get("/api/job-boards")
+def get_job_boards(current_user: models.User = Depends(get_current_user)):
+    """Which job boards this user has signed in to for auto-apply."""
+    return job_boards.status(f"user_{current_user.id}")
+
+@app.post("/api/job-boards/{board}/sign-in")
+def sign_in_job_board(board: str, current_user: models.User = Depends(get_current_user)):
+    """Opens a browser window on this computer at the board's sign-in page, in the user's own
+    profile, and waits until the user closes it. Sync def: FastAPI runs it in a worker thread."""
+    _board_or_404(board)
+    try:
+        result = job_boards.open_sign_in_window(f"user_{current_user.id}", board)
+    except RuntimeError as e:
+        raise HTTPException(status_code=409, detail=str(e))
+    except Exception as e:
+        traceback.print_exc()
+        raise HTTPException(status_code=500, detail=f"Couldn't open the browser: {e}")
+    return result
+
+@app.post("/api/job-boards/{board}/confirm")
+def confirm_job_board(board: str, req: BoardConfirmRequest, current_user: models.User = Depends(get_current_user)):
+    """For boards whose sign-in can't be checked automatically, the user says whether it worked."""
+    _board_or_404(board)
+    return job_boards.set_signed_in(f"user_{current_user.id}", board, req.signed_in, verified=False)
+
 
 # 3. Serve the web frontend (frontend/) at "/". Mounted last so every /api route above takes priority.
 class RevalidatedStaticFiles(StaticFiles):

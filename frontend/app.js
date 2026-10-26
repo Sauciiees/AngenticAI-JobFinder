@@ -97,11 +97,13 @@
     toastTimer = setTimeout(() => (t.hidden = true), 3200);
   }
 
-  function confirmDialog(title, body, okLabel = "Delete") {
+  function confirmDialog(title, body, okLabel = "Delete", { danger = true, cancelLabel = "Cancel" } = {}) {
     const d = $("#confirm");
     $("#confirm-title").textContent = title;
     $("#confirm-body").textContent = body;
     $("#confirm-ok").textContent = okLabel;
+    $("#confirm-ok").className = `btn ${danger ? "btn-danger" : "btn-primary"}`;
+    d.querySelector('button[value="cancel"]').textContent = cancelLabel;
     d.returnValue = "";
     d.showModal();
     return new Promise((resolve) => d.addEventListener("close", () => resolve(d.returnValue === "ok"), { once: true }));
@@ -111,7 +113,7 @@
   // API
   // ============================================================
   class ApiError extends Error {
-    constructor(message, status) { super(message); this.status = status; }
+    constructor(message, status, detail) { super(message); this.status = status; this.detail = detail; }
   }
 
   async function api(method, path, body, { form = false, query } = {}) {
@@ -137,7 +139,8 @@
     try { data = text ? JSON.parse(text) : null; } catch { data = text; }
     if (!res.ok) {
       const detail = data && typeof data === "object" && data.detail ? data.detail : null;
-      throw new ApiError(typeof detail === "string" ? detail : `Request failed (${res.status}).`, res.status);
+      const message = typeof detail === "string" ? detail : detail?.message || `Request failed (${res.status}).`;
+      throw new ApiError(message, res.status, detail);
     }
     return data;
   }
@@ -167,6 +170,7 @@
     scoredJobs: [],
     assets: "",
     selected: new Set(),
+    boards: null,    // job-board sign-in status, from /api/job-boards
     busy: null,      // label while an agent call is running
     chatError: null, // { message, retry }
     pending: null,   // user message shown while waiting
@@ -390,6 +394,73 @@
   }
 
   // ============================================================
+  // Job-board sign-in (the auto-apply agent never logs in for the user)
+  // ============================================================
+  async function loadBoards() {
+    try { state.boards = await api("GET", "/api/job-boards"); } catch { state.boards = state.boards || []; }
+    return state.boards;
+  }
+
+  function boardForUrl(url) {
+    let host = "";
+    try { host = new URL(url).hostname.toLowerCase(); } catch { return null; }
+    return (state.boards || []).find((b) => b.hosts.some((h) => host === h || host.endsWith(`.${h}`))) || null;
+  }
+
+  /** Boards the given jobs are on that the user hasn't signed in to yet. */
+  function boardsMissing(jobs) {
+    const out = [];
+    for (const j of jobs) {
+      const b = boardForUrl(j.link);
+      if (b && !b.signed_in && !out.includes(b)) out.push(b);
+    }
+    return out;
+  }
+
+  /** Opens the board's sign-in window on this computer and waits for the user. Resolves to true when signed in. */
+  async function signInBoard(board, btn, note) {
+    btn.disabled = true;
+    note.textContent = board.can_verify
+      ? `A ${board.name} window opened on this computer. Sign in there and it closes by itself.`
+      : `A ${board.name} window opened on this computer. Sign in there, then close the window.`;
+    try {
+      const r = await api("POST", `/api/job-boards/${board.key}/sign-in`);
+      let ok = r.signed_in;
+      if (ok === null) {
+        ok = await confirmDialog(`Did you sign in to ${board.name}?`,
+          "The agent will apply with that account. Choose No if you closed the window before signing in.",
+          "Yes, I'm signed in", { danger: false, cancelLabel: "No" });
+        await api("POST", `/api/job-boards/${board.key}/confirm`, { signed_in: ok });
+      }
+      await loadBoards();
+      note.textContent = ok ? "" : `No ${board.name} sign-in was saved. Try again and finish signing in before closing the window.`;
+      if (ok) toast(`Signed in to ${board.name}`);
+      return ok;
+    } catch (e) {
+      if (e.status !== 401) note.textContent = e.message;
+      return false;
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  function boardRow(board, onChange) {
+    const note = h("p", { class: "hint", role: "status" });
+    const btn = h("button", { class: `btn ${board.signed_in ? "btn-outline" : "btn-primary"}`, type: "button" },
+      board.signed_in ? "Sign in again" : `Sign in to ${board.name}`);
+    btn.addEventListener("click", async () => { if (await signInBoard(board, btn, note)) onChange(); });
+    const when = board.updated_at ? formatDate(board.updated_at) : "";
+    return h("li", { class: "board-row" },
+      h("div", { class: "board-main" },
+        h("span", { class: "board-name" }, board.name),
+        h("span", { class: `board-state${board.signed_in ? " ok" : ""}` },
+          board.signed_in ? icon("check_circle", "fill") : null,
+          board.signed_in ? `Signed in${when ? ` · ${when}` : ""}` : "Not signed in"),
+        note),
+      btn);
+  }
+
+  // ============================================================
   // Router
   // ============================================================
   function route() {
@@ -577,9 +648,23 @@
     return n >= 75 ? "high" : n >= 50 ? "mid" : "low";
   }
 
+  function renderSignInGate(missing) {
+    const names = missing.map((b) => b.name).join(" and ");
+    return h("div", { class: "signin-gate", role: "region", "aria-labelledby": "gate-title" },
+      h("div", { class: "signin-gate-head" },
+        icon("lock"),
+        h("div", null,
+          h("h3", { id: "gate-title" }, `Sign in to ${names} first`),
+          h("p", null, "The agent applies with your own account and never signs in for you. You only need to do this once."))),
+      h("ul", { class: "boards" }, missing.map((b) => boardRow(b, () => renderChat({ keepScroll: true })))));
+  }
+
   function renderReview() {
     const jobs = state.scoredJobs;
     const n = jobs.length;
+    if (state.boards === null) loadBoards().then(() => { if (state.pipeline === "paused_for_review") renderChat({ keepScroll: true }); });
+    const missing = state.boards ? boardsMissing(jobs) : [];
+    const blocked = state.boards === null || missing.length > 0;
     return h("section", { class: "block", "aria-labelledby": "review-title" },
       h("div", { class: "block-head" },
         h("h2", { id: "review-title" }, `Review ${n} ${n === 1 ? "application" : "applications"} before I apply`),
@@ -597,10 +682,11 @@
       state.assets ? h("details", { class: "assets" },
         h("summary", null, icon("description"), "Cover letters and resume bullets", icon("expand_more")),
         renderMarkdown(extractText(state.assets))) : null,
+      missing.length ? renderSignInGate(missing) : null,
       h("div", { class: "block-actions" },
         h("span", { class: "gap" }),
         h("button", { class: "btn btn-text-only", type: "button", onclick: cancelPipeline }, "Don't apply"),
-        h("button", { class: "btn btn-primary", type: "button", disabled: !!state.busy || !n, onclick: approve },
+        h("button", { class: "btn btn-primary", type: "button", disabled: !!state.busy || !n || blocked, onclick: approve },
           icon("send"), `Approve and apply${n > 1 ? ` to ${n}` : ""}`)));
   }
 
@@ -767,8 +853,15 @@
   async function approve() {
     const jobs = state.scoredJobs;
     await runAgent(`Applying to ${jobs.length} ${jobs.length === 1 ? "job" : "jobs"}. This can take a few minutes…`, async () => {
-      await api("POST", "/api/job-finder/resume", { session_id: state.chatId, feedback: "approve", jobs });
+      try {
+        await api("POST", "/api/job-finder/resume", { session_id: state.chatId, feedback: "approve", jobs });
+      } catch (e) {
+        // The server refuses until the user has signed in to each board; show the sign-in step instead.
+        if (e.status === 409 && e.detail?.boards) { await loadBoards(); toast(e.message); return; }
+        throw e;
+      }
       await refreshHistory();
+      loadBoards(); // an expired session is marked signed-out by the agent
       state.pipeline = "idle";
       await loadAppsCount();
       toast(`Logged ${jobs.length} ${jobs.length === 1 ? "application" : "applications"}`);
@@ -871,8 +964,19 @@
     v.replaceChildren(h("div", { class: "page" },
       h("header", { class: "page-head" }, h("div", null, h("h1", null, "Profile"), h("p", null, "Your agents use this to choose, score and tailor applications."))),
       renderProgress(p),
-      h("div", { class: "settings" }, renderCvSection(p)),
+      h("div", { class: "settings" }, renderCvSection(p), renderBoardsSection()),
       form));
+  }
+
+  function renderBoardsSection() {
+    const list = h("ul", { class: "boards" }, h("li", { class: "board-row" }, h("span", { class: "skeleton", style: "width:40%;height:16px" })));
+    const draw = () => list.replaceChildren(...(state.boards || []).map((b) => boardRow(b, draw)));
+    loadBoards().then(draw);
+    return h("section", { class: "setting", "aria-labelledby": "sec-boards" },
+      h("div", { class: "setting-label" },
+        h("h2", { id: "sec-boards" }, "Job board sign-in"),
+        h("p", null, "Sign in once on each site you want to auto-apply on. The agent uses these sessions and never logs in for you. The window opens on the computer running Job Finder.")),
+      h("div", { class: "setting-panel" }, list));
   }
 
   async function saveProfile(e) {
@@ -988,7 +1092,7 @@
     const v = String(s || "").toLowerCase();
     if (v === "offer") return "positive";
     if (v === "interviewed") return "info";
-    if (v === "pending" || v.includes("manual")) return "warning";
+    if (v === "pending" || v.includes("manual") || v.includes("sign-in")) return "warning";
     if (v === "rejected" || v.startsWith("failed")) return "negative";
     return "neutral";
   }

@@ -202,6 +202,9 @@ INSTRUCTIONS:
 3. CRITICAL: If you do not see the expected "Next", "Review", or "Submit Application" button on the screen, it is likely off-screen. Use the "scroll_down" action to scroll the page and look for it! Do NOT guess random elements.
 4. CRITICAL: If the "Review" or "Submit" button is visible but GREYED OUT (disabled), it means you missed a required field! Look carefully at all empty input fields and fill them out.
 5. If you see a CAPTCHA or "verify you are human" challenge, respond with the "captcha" action.
+5b. NEVER sign in, log in, enter a password or create an account. The applicant signs in to job boards
+    themselves beforehand. If the page asks you to sign in or join before you can apply (a login form,
+    "Sign in to apply", "Join now"), respond with the "login_required" action instead.
 6. If you see a success/confirmation page (e.g. "Application submitted", "Thank you"), respond with the "done" action.
 7. If you see a cookie consent banner or popup blocking the form, dismiss it first.
 8. For file upload fields (resume/CV), use the "upload" action.
@@ -219,6 +222,7 @@ Valid action types:
 - "scroll_down": Scroll page down. No element_id or value needed.
 - "scroll_up": Scroll page up. No element_id or value needed.
 - "captcha": Pause for human to solve CAPTCHA. No element_id or value needed.
+- "login_required": The site wants the applicant to sign in first. Stop. No element_id or value needed.
 - "done": Application submitted successfully. No element_id or value needed.
 - "stuck": Cannot proceed further. No element_id or value needed.
 
@@ -338,6 +342,7 @@ def auto_apply_to_job(
     cv_filepath: str = "",
     on_status_update=None,
     on_captcha_detected=None,
+    profile_dir: str = PROFILE_DIR,
 ) -> dict:
     """
     Main entry point: Autonomously applies to a single job using vision-driven browser automation.
@@ -348,19 +353,20 @@ def auto_apply_to_job(
         cv_filepath: Absolute path to the user's CV/resume PDF file.
         on_status_update: Optional callback(step, action_description) for progress updates.
         on_captcha_detected: Optional callback() that blocks until human solves CAPTCHA.
-    
+        profile_dir: Browser profile holding the applicant's own job-board sign-ins (see tools/job_boards.py).
+
     Returns:
         dict with keys:
             - "success": bool
             - "steps_taken": int
-            - "final_status": str ("submitted", "captcha_timeout", "stuck", "max_steps_reached", "error")
+            - "final_status": str ("submitted", "captcha_timeout", "stuck", "login_required", "max_steps_reached", "error")
             - "screenshot_path": str (path to final screenshot)
             - "action_log": list of action descriptions
     """
     from playwright.sync_api import sync_playwright
     
     os.makedirs(SCREENSHOT_DIR, exist_ok=True)
-    os.makedirs(PROFILE_DIR, exist_ok=True)
+    os.makedirs(profile_dir, exist_ok=True)
     
     vision_client = _get_vision_llm()
     action_history = []
@@ -376,7 +382,7 @@ def auto_apply_to_job(
         with sync_playwright() as p:
             # Launch browser with persistent profile (keeps login sessions)
             browser = p.chromium.launch_persistent_context(
-                user_data_dir=PROFILE_DIR,
+                user_data_dir=profile_dir,
                 headless=False,  # Visible so user can solve CAPTCHAs
                 viewport={"width": 1280, "height": 900},
                 user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
@@ -495,6 +501,12 @@ def auto_apply_to_job(
                         page.wait_for_timeout(30000)
                     continue
                 
+                if action_type == "login_required":
+                    result["final_status"] = "login_required"
+                    action_history.append(f"Step {step}: LOGIN REQUIRED - stopped; the applicant must sign in first")
+                    result["action_log"] = action_history
+                    break
+
                 if action_type == "stuck":
                     result["final_status"] = "stuck"
                     action_history.append(f"Step {step}: STUCK - Agent cannot proceed")
@@ -540,21 +552,34 @@ def auto_apply_to_jobs(
     user_profile: dict,
     cv_filepath: str = "",
     on_job_status_update=None,
+    user_key: str = "anonymous",
 ) -> list:
     """
-    Apply to multiple jobs sequentially.
-    
+    Apply to multiple jobs sequentially, in the user's own browser profile.
+
     Args:
         jobs: List of job dicts, each with at least "title", "company", "link".
         user_profile: User profile dict.
         cv_filepath: Path to CV file.
         on_job_status_update: Optional callback(job_index, job_title, status_message).
-    
+        user_key: The applicant's id ("user_3"); selects their browser profile and sign-ins.
+
     Returns:
         List of result dicts, one per job.
     """
+    from tools import job_boards
+
+    lock = job_boards.profile_lock(user_key)
+    with lock:  # never share the profile with an open sign-in window
+        return _apply_each(jobs, user_profile, cv_filepath, on_job_status_update, user_key)
+
+
+def _apply_each(jobs, user_profile, cv_filepath, on_job_status_update, user_key):
+    from tools import job_boards
+
     results = []
-    
+    signed_in = job_boards.load_state(user_key)
+
     for i, job in enumerate(jobs):
         title = job.get("title", "Unknown")
         company = job.get("company", "Unknown")
@@ -575,7 +600,19 @@ def auto_apply_to_jobs(
                 "action_log": ["No application URL provided"],
             })
             continue
-        
+
+        # Only apply on boards the applicant has signed in to themselves; never log in for them.
+        board = job_boards.board_for_url(url)
+        if board and not signed_in.get(board, {}).get("signed_in"):
+            results.append({
+                "job": job,
+                "success": False,
+                "final_status": "login_required",
+                "steps_taken": 0,
+                "action_log": [f"Not signed in to {job_boards.BOARDS[board]['name']}; skipped"],
+            })
+            continue
+
         if on_job_status_update:
             on_job_status_update(i, title, "Starting application...")
         
@@ -588,9 +625,15 @@ def auto_apply_to_jobs(
             user_profile=user_profile,
             cv_filepath=cv_filepath,
             on_status_update=status_callback,
+            profile_dir=job_boards.profile_dir(user_key),
         )
         result["job"] = job
         results.append(result)
+
+        # The board's session has expired: ask the user to sign in again next time.
+        if board and result["final_status"] == "login_required":
+            job_boards.set_signed_in(user_key, board, False)
+            signed_in = job_boards.load_state(user_key)
         
         if on_job_status_update:
             status = "Success" if result["success"] else result["final_status"]

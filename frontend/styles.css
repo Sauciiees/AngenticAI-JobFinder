@@ -542,6 +542,23 @@ input[type="checkbox"]:checked::after { transform: rotate(-45deg) scale(1); }
 .drop strong { color: var(--text); font-weight: 500; }
 .drop input { position: absolute; width: 1px; height: 1px; opacity: 0; }
 
+/* Job-board sign-in */
+.boards { list-style: none; margin: 0; padding: 0; border-radius: 16px; background: var(--surface); overflow: hidden; }
+.boards > li + li { border-top: 1px solid var(--border); }
+.board-row { display: flex; align-items: center; gap: 16px; padding: 14px 16px; }
+.board-main { flex: 1; min-width: 0; display: grid; gap: 2px; }
+.board-name { font-weight: 500; }
+.board-state { font-size: 13px; color: var(--muted); display: inline-flex; align-items: center; gap: 6px; }
+.board-state.ok { color: var(--positive-ink); }
+.board-state .ms { font-size: 16px; }
+.board-row .hint:empty { display: none; }
+.signin-gate { display: grid; gap: 14px; padding: 18px; border-radius: var(--r-card); background: var(--info-bg); color: var(--info-ink); }
+.signin-gate-head { display: flex; gap: 12px; align-items: flex-start; }
+.signin-gate-head .ms { font-size: 22px; margin-top: 1px; }
+.signin-gate h3 { font-size: 16px; font-weight: 500; line-height: 1.4; }
+.signin-gate p { font-size: 14px; }
+.signin-gate .boards { background: var(--ground); color: var(--text); }
+
 /* Applications */
 .filters { display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 20px; }
 .filter {

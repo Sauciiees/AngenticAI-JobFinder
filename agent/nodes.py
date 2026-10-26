@@ -456,6 +456,7 @@ def auto_apply_node(state: State):
           jobs=scored_jobs,
           user_profile=structured_profile,
           cv_filepath=cv_filepath,
+          user_key=user_id,  # the user's own browser profile and job-board sign-ins
       )
   
   with ThreadPoolExecutor(max_workers=1) as executor:

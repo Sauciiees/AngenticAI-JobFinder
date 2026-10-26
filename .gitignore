@@ -8,3 +8,4 @@ uploads/
 vector_db/
 *.pdf
 .taste-skill/
+browser_profile/user_*/
