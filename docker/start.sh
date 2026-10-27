@@ -3,7 +3,9 @@
 # shares it as a web page through noVNC, then runs the API and web app.
 set -e
 
-# 1. Virtual display that Playwright's non-headless Chromium draws on
+# 1. Virtual display that Playwright's non-headless Chromium draws on.
+#    A container restart keeps /tmp, so clear the previous run's lock or Xvfb refuses to start.
+rm -f /tmp/.X99-lock /tmp/.X11-unix/X99
 Xvfb :99 -screen 0 1366x1000x24 -nolisten tcp &
 sleep 1
 
